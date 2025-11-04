@@ -16,7 +16,6 @@ library(digest)
 # -------------------------------------------------------------------
 # Load SmartCare JSON metadata
 # -------------------------------------------------------------------
-IMPORT_DATE <- format(Sys.Date(), "%B %d, %Y")
 data_dir <- "data/JSON"
 
 safe_read_json <- function(path) {
@@ -586,7 +585,7 @@ ui <- fluidPage(
           textInput("global_search", label = NULL,
                     placeholder = "🔍 Search across all columns (table, column, values)...", width = "100%")
       ),
-      div(class = "import-note", paste("Date of Data Import:", IMPORT_DATE)),
+      uiOutput("extract_date_all_tables"),
       div(class = "datatable-card", DTOutput("results"))
     )
   ),
@@ -607,7 +606,7 @@ ui <- fluidPage(
       
       div(class = "detail-card",
           h3(textOutput("tbl_header")),
-          div(class = "subtle-line", paste("Date of Data Import:", IMPORT_DATE)),
+          uiOutput("extract_date_table_details"),
           tags$hr(),
           
           div(class = "section-title", "Table Description"),
@@ -659,7 +658,7 @@ ui <- fluidPage(
       
       div(class = "detail-card",
           h3(textOutput("col_name")),
-          div(class = "subtle-line", paste("Date of Data Import:", IMPORT_DATE)),
+          uiOutput("extract_date_column_details"),
           uiOutput("col_context_text"),
           tags$hr(),
           
@@ -717,7 +716,7 @@ ui <- fluidPage(
                     placeholder = "🔍 Search relationships (table names, columns, join types)...", width = "100%")
       ),
       
-      div(class = "import-note", paste("Date of Data Import:", IMPORT_DATE)),
+      uiOutput("extract_date_relationships"),
       
       div(class = "relationship-summary",
           fluidRow(
@@ -743,6 +742,41 @@ server <- function(input, output, session) {
   authenticated <- reactiveVal(FALSE)
   data_source <- reactiveVal(NULL)  # Will be "internal" or "suppressed"
   metadata_internal <- reactiveVal(NULL)
+  extract_date <- reactiveVal(NULL)
+
+  set_extract_date <- function(metadata_raw) {
+    if (!is.null(metadata_raw) && "date_of_extract" %in% names(metadata_raw)) {
+      extract_values <- unique(metadata_raw$date_of_extract)
+      extract_values <- extract_values[!is.na(extract_values) & extract_values != ""]
+      if (length(extract_values) > 0) {
+        parsed_date <- suppressWarnings(as.Date(extract_values[1]))
+        if (!is.na(parsed_date)) {
+          extract_date(format(parsed_date, "%B %d, %Y"))
+        } else {
+          extract_date(as.character(extract_values[1]))
+        }
+        return(invisible(NULL))
+      }
+    }
+    extract_date(NULL)
+    invisible(NULL)
+  }
+
+  render_extract_date <- function(css_class) {
+    renderUI({
+      req(authenticated())
+      date_val <- extract_date()
+      if (is.null(date_val)) {
+        return(NULL)
+      }
+      div(class = css_class, paste("Date of extract:", date_val))
+    })
+  }
+
+  output$extract_date_all_tables <- render_extract_date("import-note")
+  output$extract_date_table_details <- render_extract_date("subtle-line")
+  output$extract_date_column_details <- render_extract_date("subtle-line")
+  output$extract_date_relationships <- render_extract_date("import-note")
   
   # Show/hide login page
   output$showLogin <- reactive(!authenticated())
@@ -808,6 +842,7 @@ server <- function(input, output, session) {
       }
       
       metadata_internal(as_tibble(metadata_raw))
+      set_extract_date(metadata_raw)
       data_source("internal")
       authenticated(TRUE)
       
@@ -860,6 +895,7 @@ server <- function(input, output, session) {
       }
       
       metadata_internal(as_tibble(metadata_raw))
+      set_extract_date(metadata_raw)
       data_source("suppressed")
       authenticated(TRUE)
       
