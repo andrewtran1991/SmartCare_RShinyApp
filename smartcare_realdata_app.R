@@ -212,10 +212,10 @@ parse_sample_values <- function(sample_str) {
   if (is.na(sample_str) || sample_str == "" || is.null(sample_str)) {
     return("")
   }
-  
+
   # Split by semicolon to get individual entries
   entries <- strsplit(as.character(sample_str), ";")[[1]]
-  
+
   # Extract just the value part (before the opening parenthesis)
   values <- character()
   for (entry in entries) {
@@ -235,13 +235,138 @@ parse_sample_values <- function(sample_str) {
       values <- c(values, entry)
     }
   }
-  
+
   # Return first 10 values for compact, all for full
   if (length(values) == 0) {
     return("")
   }
-  
+
   return(paste(values, collapse = "; "))
+}
+
+parse_sample_values_detailed <- function(sample_str) {
+  if (is.null(sample_str) || is.na(sample_str) || trimws(sample_str) == "") {
+    return(tibble(
+      value = character(),
+      label = character(),
+      count = numeric(),
+      percent = numeric()
+    ))
+  }
+
+  entries <- strsplit(as.character(sample_str), ";")[[1]]
+
+  parsed <- map_dfr(entries, function(entry) {
+    entry <- trimws(entry)
+    if (entry == "") {
+      return(tibble(value = character(), label = character(), count = numeric(), percent = numeric()))
+    }
+
+    entry <- str_replace(entry, " \\+ others.*$", "")
+
+    count_match <- str_match(entry, "n\\s*=\\s*([0-9,]+)")
+    count_val <- if (!is.na(count_match[, 2])) as.numeric(str_replace_all(count_match[, 2], ",", "")) else NA_real_
+
+    percent_match <- str_match(entry, "([0-9]+(?:\\.[0-9]+)?)%")
+    percent_val <- if (!is.na(percent_match[, 2])) as.numeric(percent_match[, 2]) else NA_real_
+
+    value_part <- str_trim(str_replace(entry, "\\(.*$", ""))
+
+    value <- value_part
+    label <- value_part
+
+    if (str_detect(value_part, "\"")) {
+      value_part <- str_replace_all(value_part, "\"", "")
+    }
+
+    if (str_detect(value_part, " \\| ")) {
+      # Some entries may separate values with pipes, keep first portion as value
+      pieces <- str_split(value_part, " \\| ", n = 2)[[1]]
+      if (length(pieces) == 2) {
+        value_part <- str_trim(pieces[1])
+        label <- str_trim(pieces[2])
+      }
+    }
+
+    if (str_detect(value_part, "\\s*-\\s*")) {
+      parts <- str_split(value_part, "\\s*-\\s*", n = 2)[[1]]
+      value <- str_trim(parts[1])
+      label <- str_trim(parts[2])
+    } else if (str_detect(value_part, "\\s*:\\s*")) {
+      parts <- str_split(value_part, "\\s*:\\s*", n = 2)[[1]]
+      value <- str_trim(parts[1])
+      label <- str_trim(parts[2])
+    } else {
+      value <- str_trim(value_part)
+      label <- value
+    }
+
+    tibble(
+      value = value,
+      label = label,
+      count = count_val,
+      percent = percent_val
+    )
+  })
+
+  parsed %>% filter(!is.na(value) & value != "")
+}
+
+format_active_flag <- function(active_val) {
+  if (is.null(active_val) || is.na(active_val) || active_val == "") {
+    return("")
+  }
+
+  active_val <- tolower(as.character(active_val))
+  if (active_val %in% c("y", "yes", "true", "1")) {
+    "Yes"
+  } else if (active_val %in% c("n", "no", "false", "0")) {
+    "No"
+  } else {
+    tools::toTitleCase(active_val)
+  }
+}
+
+lookup_global_code_info <- function(value, column_name) {
+  if (is.null(sc_global_codes) || !is.data.frame(sc_global_codes) || nrow(sc_global_codes) == 0) {
+    return(NULL)
+  }
+
+  search_frames <- list(sc_global_codes)
+  if ("Category" %in% names(sc_global_codes)) {
+    category_matches <- sc_global_codes %>%
+      filter(as.character(Category) == column_name)
+    if (nrow(category_matches) > 0) {
+      search_frames <- c(list(category_matches), search_frames)
+    }
+  }
+
+  value_char <- as.character(value)
+  value_num <- suppressWarnings(as.numeric(value_char))
+
+  for (df in search_frames) {
+    if (nrow(df) == 0) next
+
+    if ("Code" %in% names(df)) {
+      match_df <- df %>% filter(!is.na(Code) & as.character(Code) == value_char)
+      if (nrow(match_df) > 0) return(match_df[1, , drop = FALSE])
+    }
+
+    global_code_col <- if ("GlobalCodeId" %in% names(df)) "GlobalCodeId" else NULL
+    if (!is.null(global_code_col)) {
+      match_df <- df %>% filter(!is.na(.data[[global_code_col]]) &
+                                 (as.character(.data[[global_code_col]]) == value_char |
+                                  (!is.na(value_num) & .data[[global_code_col]] == value_num)))
+      if (nrow(match_df) > 0) return(match_df[1, , drop = FALSE])
+    }
+
+    if ("CodeName" %in% names(df)) {
+      match_df <- df %>% filter(!is.na(CodeName) & as.character(CodeName) == value_char)
+      if (nrow(match_df) > 0) return(match_df[1, , drop = FALSE])
+    }
+  }
+
+  NULL
 }
 
 # Helper: get data type from chatbot data
@@ -545,6 +670,17 @@ ui <- fluidPage(
       margin-bottom: 20px;
       font-size: 14px;
     }
+    .example-values-link {
+      color: #0078D7;
+      text-decoration: none;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-block;
+      word-break: break-word;
+    }
+    .example-values-link:hover {
+      text-decoration: underline;
+    }
   "))),
   
   # Login Page
@@ -671,7 +807,7 @@ ui <- fluidPage(
                 column(3, div(class = "info-box", strong("Default Value:"), br(), textOutput("col_default")))
               ),
               fluidRow(
-                column(12, div(class = "info-box", strong("Dropdown Values:"), br(), textOutput("col_values")))
+                column(12, div(class = "info-box", strong("Example Values:"), br(), uiOutput("col_values")))
               )
           ),
           
@@ -1271,7 +1407,9 @@ server <- function(input, output, session) {
           }),
           drop_values_full = drop_values_parsed
         ) %>%
-        select(table_name, field_name, drop_values, drop_values_full)
+        select(table_name, field_name,
+               sample_values_raw = sample_values,
+               drop_values, drop_values_full)
       
       # Build unified dataset with vectorized operations
       test_app <- fields_meta %>%
@@ -1306,29 +1444,30 @@ server <- function(input, output, session) {
         test_app <- test_app %>%
           left_join(lookups$global_codes, by = c("table_name", "field_name")) %>%
           mutate(
-            `Dropdown Values` = ifelse(!is.na(global_codes) & global_codes != "", global_codes, drop_values %||% ""),
-            `Dropdown Values Full` = ifelse(!is.na(global_codes) & global_codes != "", global_codes, drop_values_full %||% "")
+            `Example Values` = ifelse(!is.na(global_codes) & global_codes != "", global_codes, drop_values %||% ""),
+            `Example Values Full` = ifelse(!is.na(global_codes) & global_codes != "", global_codes, drop_values_full %||% "")
           ) %>%
           select(-global_codes)
       } else {
         test_app <- test_app %>%
           mutate(
-            `Dropdown Values` = drop_values %||% "",
-            `Dropdown Values Full` = drop_values_full %||% ""
+            `Example Values` = drop_values %||% "",
+            `Example Values Full` = drop_values_full %||% ""
           )
       }
-      
+
       # Finalize columns
       test_app <- test_app %>%
         mutate(
           `% Filled` = round(as.numeric(fill) * 100, 1),
           `# Unique Values` = uniques
         ) %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`, `# Unique Values`, `Key Type`)
-      
+        select(Table, Column, `Variable Type`, `Example Values`, `Example Values Full`,
+               `% Filled`, `# Unique Values`, `Key Type`, `Sample Values Raw` = sample_values_raw)
+
       # Create display version
       test_app_display <- test_app %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `% Filled`, `# Unique Values`, `Key Type`)
+        select(Table, Column, `Variable Type`, `Example Values`, `% Filled`, `# Unique Values`, `Key Type`)
       
       # Extract relationships (cached)
       table_relationships <- extract_table_relationships()
@@ -1381,6 +1520,8 @@ server <- function(input, output, session) {
   
   # Reactive value to track current column
   current_column <- reactiveVal(NULL)
+  selected_column_details <- reactiveVal(NULL)
+  example_values_data <- reactiveVal(NULL)
   
   # --- Global search (All Tables)
   filtered_data <- reactive({
@@ -1436,7 +1577,9 @@ server <- function(input, output, session) {
         filter(Column == current_column()) %>%
         left_join(data$tables_meta, by = "Table") %>%
         slice(1)
-      
+
+      selected_column_details(selected)
+
       updateTabsetPanel(session, "mainNav", selected = "Column Details")
       
       # Update dropdown choices with columns from the same table
@@ -1467,8 +1610,7 @@ server <- function(input, output, session) {
       output$col_filled <- renderText({ paste0(selected$`% Filled`, "%") })
       output$col_unique <- renderText({ selected$`# Unique Values` })
       output$col_default <- renderText({ derive_default() })
-      output$col_values <- renderText({ selected$`Dropdown Values Full` })
-    
+
     output$col_context_text <- renderUI({
       this_tbl <- selected$Table
       tbl_info <- dplyr::filter(data$tables_meta, Table == this_tbl)
@@ -1500,6 +1642,198 @@ server <- function(input, output, session) {
                        style = "color:#0078D7; text-decoration:none;"))
       }))
     })
+    }
+  })
+
+  output$col_values <- renderUI({
+    selected <- selected_column_details()
+    if (is.null(selected) || nrow(selected) == 0) {
+      return(tags$span("No example values available"))
+    }
+
+    preview <- selected$`Example Values`[1]
+    full <- selected$`Example Values Full`[1]
+    raw <- selected$`Sample Values Raw`[1]
+
+    has_data <- (!is.null(full) && !is.na(full) && trimws(full) != "") ||
+      (!is.null(raw) && !is.na(raw) && trimws(raw) != "")
+
+    if (!has_data) {
+      text_display <- preview
+      if (is.null(text_display) || is.na(text_display) || trimws(text_display) == "") {
+        text_display <- "No example values available"
+      }
+      return(tags$span(text_display))
+    }
+
+    text_display <- preview
+    if (is.null(text_display) || is.na(text_display) || trimws(text_display) == "") {
+      text_display <- full
+    }
+    if (is.null(text_display) || is.na(text_display) || trimws(text_display) == "") {
+      text_display <- "View example values"
+    }
+
+    text_display <- stringr::str_trunc(text_display, 200)
+
+    tags$a(
+      text_display,
+      href = "#",
+      class = "example-values-link",
+      onclick = "Shiny.setInputValue('open_example_values', Math.random(), {priority: 'event'}); return false;"
+    )
+  })
+
+  build_example_values_table <- function(selected_row) {
+    if (is.null(selected_row) || nrow(selected_row) == 0) {
+      return(tibble())
+    }
+
+    sample_raw <- selected_row$`Sample Values Raw`[1]
+    parsed <- parse_sample_values_detailed(sample_raw)
+    parsed <- parsed %>% filter(!is.na(value) & value != "")
+
+    is_global_code <- str_detect(selected_row$`Variable Type`[1] %||% "", "type_GlobalCode")
+    current_source <- data_source() %||% ""
+
+    if (current_source == "suppressed") {
+      values <- if (nrow(parsed) > 0) parsed$value else character()
+
+      if (length(values) == 0 && !is.null(sample_raw) && !is.na(sample_raw) && trimws(sample_raw) != "") {
+        values <- strsplit(as.character(sample_raw), ";")[[1]] %>% trimws()
+      }
+
+      if (length(values) == 0) {
+        fallback <- selected_row$`Example Values Full`[1]
+        if (!is.null(fallback) && !is.na(fallback) && trimws(fallback) != "") {
+          values <- strsplit(as.character(fallback), "\n|; ")[[1]] %>% trimws()
+        }
+      }
+
+      values <- unique(values[values != ""])
+      if (length(values) == 0) {
+        return(tibble())
+      }
+
+      results <- purrr::map_dfr(values, function(val) {
+        info <- lookup_global_code_info(val, selected_row$Column[1])
+        label_candidates <- parsed %>% filter(value == val) %>% pull(label)
+        label_val <- if (length(label_candidates) > 0 && !is.na(label_candidates[1]) && label_candidates[1] != "") {
+          label_candidates[1]
+        } else {
+          NA_character_
+        }
+
+        if (!is.null(info) && "CodeName" %in% names(info) && !is.na(info$CodeName) && info$CodeName != "") {
+          label_val <- as.character(info$CodeName)
+        }
+
+        if (is.null(label_val) || is.na(label_val) || label_val == "") {
+          label_val <- val
+        }
+
+        active_val <- if (!is.null(info) && "Active" %in% names(info)) {
+          format_active_flag(info$Active)
+        } else {
+          ""
+        }
+
+        tibble(
+          `Global Code Value` = val,
+          Label = label_val,
+          `Active Flag` = ifelse(active_val == "", NA_character_, active_val)
+        )
+      }) %>%
+        distinct(`Global Code Value`, .keep_all = TRUE) %>%
+        slice_head(n = 20)
+
+      return(results)
+    }
+
+    if (nrow(parsed) == 0) {
+      fallback <- selected_row$`Example Values Full`[1]
+      if (!is.null(fallback) && !is.na(fallback) && trimws(fallback) != "") {
+        values <- strsplit(as.character(fallback), "\n|; ")[[1]] %>% trimws()
+        parsed <- tibble(
+          value = values,
+          label = values,
+          count = NA_real_,
+          percent = NA_real_
+        ) %>% filter(value != "")
+      }
+    }
+
+    if (nrow(parsed) == 0) {
+      return(tibble())
+    }
+
+    parsed <- parsed %>% mutate(label = ifelse(is.na(label) | label == "", value, label))
+
+    if (is_global_code) {
+      parsed <- parsed %>%
+        mutate(
+          gc_info = purrr::map(value, ~lookup_global_code_info(.x, selected_row$Column[1])),
+          label = purrr::map2_chr(gc_info, label, function(info, lbl) {
+            if (!is.null(info) && "CodeName" %in% names(info) && !is.na(info$CodeName) && info$CodeName != "") {
+              as.character(info$CodeName)
+            } else if (!is.na(lbl) && lbl != "") {
+              lbl
+            } else {
+              NA_character_
+            }
+          }),
+          active = purrr::map_chr(gc_info, function(info) {
+            if (!is.null(info) && "Active" %in% names(info)) {
+              format_active_flag(info$Active)
+            } else {
+              ""
+            }
+          })
+        ) %>%
+        select(-gc_info)
+    } else {
+      parsed <- parsed %>% mutate(active = "")
+    }
+
+    parsed %>%
+      mutate(
+        `Frequency %` = ifelse(!is.na(percent), paste0(format(round(percent, 2), trim = TRUE), "%"), NA_character_),
+        Label = ifelse(is.na(label) | label == "", value, label),
+        `Active Flag` = ifelse(active == "", NA_character_, active)
+      ) %>%
+      arrange(desc(percent), value) %>%
+      distinct(value, .keep_all = TRUE) %>%
+      slice_head(n = 20) %>%
+      select(Value = value, Label, `Frequency %`, `Active Flag`)
+  }
+
+  output$example_values_table <- renderTable({
+    req(example_values_data())
+    as.data.frame(example_values_data())
+  }, striped = TRUE, bordered = TRUE, hover = TRUE, spacing = "s", na = "")
+
+  observeEvent(input$open_example_values, {
+    req(selected_column_details())
+    selected <- selected_column_details()
+    table_data <- build_example_values_table(selected)
+    title_text <- sprintf("Example Values — %s.%s", selected$Table[1], selected$Column[1])
+
+    if (nrow(table_data) == 0) {
+      example_values_data(NULL)
+      showModal(modalDialog(
+        title = title_text,
+        tags$p("No example values available for this field."),
+        easyClose = TRUE,
+        footer = modalButton("Close")
+      ))
+    } else {
+      example_values_data(table_data)
+      showModal(modalDialog(
+        title = title_text,
+        div(style = "max-height:400px; overflow-y:auto;", tableOutput("example_values_table")),
+        easyClose = TRUE,
+        footer = modalButton("Close")
+      ))
     }
   })
   
@@ -1587,7 +1921,7 @@ server <- function(input, output, session) {
              `% Filled`,
              `# Unique Values`,
              `Key Type`,
-             `Dropdown Values`)
+             `Example Values`)
     
     cols_expanded$`Column Name` <- sprintf(
       "<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>",
