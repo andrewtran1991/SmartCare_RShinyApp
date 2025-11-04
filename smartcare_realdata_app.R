@@ -244,6 +244,35 @@ parse_sample_values <- function(sample_str) {
   return(paste(values, collapse = "; "))
 }
 
+format_count_value <- function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return("—")
+  }
+  value <- suppressWarnings(as.numeric(x))
+  if (is.na(value)) {
+    return("—")
+  }
+  format(value, big.mark = ",", trim = TRUE, scientific = FALSE)
+}
+
+format_percent_value <- function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return("—")
+  }
+  value <- suppressWarnings(as.numeric(x))
+  if (is.na(value)) {
+    return("—")
+  }
+  paste0(round(value, 1), "%")
+}
+
+format_text_value <- function(x) {
+  if (is.null(x) || length(x) == 0 || is.na(x) || x == "") {
+    return("—")
+  }
+  stringr::str_trim(as.character(x))
+}
+
 # Helper: get data type from chatbot data
 get_data_type_from_chatbot <- function(tbl, col) {
   if (!is.null(sc_chatbot_data) && "tables" %in% names(sc_chatbot_data) && tbl %in% names(sc_chatbot_data$tables)) {
@@ -665,13 +694,28 @@ ui <- fluidPage(
           
           div(class = "summary-grid",
               fluidRow(
-                column(3, div(class = "info-box", strong("Data Type:"), br(), textOutput("col_type"))),
-                column(3, div(class = "info-box", strong("% Filled:"), br(), textOutput("col_filled"))),
-                column(3, div(class = "info-box", strong("# Unique Values:"), br(), textOutput("col_unique"))),
-                column(3, div(class = "info-box", strong("Default Value:"), br(), textOutput("col_default")))
+                column(3, div(class = "info-box", strong("Field Type:"), br(), textOutput("col_type"))),
+                column(3, div(class = "info-box", strong("Total Rows (n):"), br(), textOutput("col_total_rows"))),
+                column(3, div(class = "info-box", strong("Filled (n):"), br(), textOutput("col_filled"))),
+                column(3, div(class = "info-box", strong("Missing (n):"), br(), textOutput("col_missing_n")))
               ),
               fluidRow(
-                column(12, div(class = "info-box", strong("Dropdown Values:"), br(), textOutput("col_values")))
+                column(3, div(class = "info-box", strong("Missing (%):"), br(), textOutput("col_missing_pct"))),
+                column(3, div(class = "info-box", strong("Unique (n):"), br(), textOutput("col_unique"))),
+                column(3, div(class = "info-box", strong("Unique (%):"), br(), textOutput("col_unique_pct"))),
+                column(3, div(class = "info-box", strong("SQL Import Risk:"), br(), textOutput("col_import_risk")))
+              ),
+              fluidRow(
+                column(12, div(class = "info-box", strong("Example Values:"), br(), textOutput("col_values")))
+              ),
+              fluidRow(
+                column(12, div(class = "info-box", strong("Default Value:"), br(), textOutput("col_default")))
+              ),
+              fluidRow(
+                column(12, div(class = "info-box", strong("Import Notes:"), br(), textOutput("col_import_notes")))
+              ),
+              fluidRow(
+                column(12, div(class = "info-box", strong("Fields That May Cause Import Errors:"), br(), textOutput("col_import_errors")))
               )
           ),
           
@@ -1222,33 +1266,59 @@ server <- function(input, output, session) {
       # Pre-compute lookups once
       lookups <- precompute_lookups(md)
       
-      # Create fields_meta from metadata_internal
-      fields_meta <- as_tibble(md) %>%
+      # Ensure expected metadata columns exist with consistent types
+      fields_meta <- as_tibble(md)
+
+      numeric_cols <- c(
+        "rows_total", "filled_n", "missing_n", "pct_missing", "unique_n",
+        "pct_unique", "min_length", "max_length"
+      )
+      character_cols <- c(
+        "table_name", "field_name", "field_type", "sample_values",
+        "min_numeric_or_date", "max_numeric_or_date", "data_type_details",
+        "any_import_flag", "import_flag_type", "notes", "date_of_extract",
+        "import_error_fields"
+      )
+
+      for (col in numeric_cols) {
+        if (!col %in% names(fields_meta)) {
+          fields_meta[[col]] <- NA_real_
+        }
+      }
+      for (col in character_cols) {
+        if (!col %in% names(fields_meta)) {
+          fields_meta[[col]] <- NA_character_
+        }
+      }
+
+      fields_meta <- fields_meta %>%
         mutate(
-          table_name = as.character(table_name),
-          field_name = as.character(field_name),
-          field_type = as.character(field_type),
-          rows = as.numeric(rows_total),
-          uniques = as.numeric(unique_n),
-          blanks = as.numeric(missing_n),
-          fill = ifelse(!is.na(pct_missing), 
-                        1 - as.numeric(pct_missing) / 100,
-                        ifelse(!is.na(filled_n) & !is.na(rows_total) & rows_total > 0,
-                               as.numeric(filled_n) / as.numeric(rows_total),
-                               0)),
-          field_desc = notes %||% NA_character_
+          across(all_of(character_cols), ~ as.character(.x)),
+          across(all_of(numeric_cols), ~ suppressWarnings(as.numeric(.x)))
         ) %>%
-        select(table_name, field_name, field_type, rows, uniques, blanks, fill, field_desc)
+        mutate(
+          filled_n = ifelse(
+            is.na(filled_n) & !is.na(rows_total) & !is.na(missing_n),
+            rows_total - missing_n,
+            filled_n
+          ),
+          filled_n = ifelse(
+            is.na(filled_n) & !is.na(rows_total) & !is.na(pct_missing),
+            round(rows_total * (100 - pct_missing) / 100),
+            filled_n
+          )
+        )
       
       # Create tables_meta by aggregating fields_meta
       tables_meta <- fields_meta %>%
         group_by(table_name) %>%
         summarise(
           `# of Table Cols` = n_distinct(field_name),
-          `# of Table Rows` = max(rows, na.rm = TRUE),
+          `# of Table Rows` = suppressWarnings(max(rows_total, na.rm = TRUE)),
           .groups = "drop"
         ) %>%
         mutate(
+          `# of Table Rows` = ifelse(is.finite(`# of Table Rows`), `# of Table Rows`, NA_real_),
           Table = table_name,
           `Table Description` = "",
           `Last Updated` = ""
@@ -1256,7 +1326,7 @@ server <- function(input, output, session) {
         select(Table, `Table Description`, `# of Table Cols`, `# of Table Rows`, `Last Updated`)
       
       # Parse sample_values to create dropdown values (vectorized)
-      values_parsed <- as_tibble(md) %>%
+      values_parsed <- fields_meta %>%
         select(table_name, field_name, sample_values) %>%
         mutate(
           drop_values_parsed = map_chr(sample_values, parse_sample_values),
@@ -1317,18 +1387,95 @@ server <- function(input, output, session) {
             `Dropdown Values Full` = drop_values_full %||% ""
           )
       }
-      
-      # Finalize columns
+
+      # Finalize columns and apply standardized labels
       test_app <- test_app %>%
-        mutate(
-          `% Filled` = round(as.numeric(fill) * 100, 1),
-          `# Unique Values` = uniques
+        rename(
+          `Field Type` = `Variable Type`,
+          `Example Values` = `Dropdown Values`,
+          `Example Values Full` = `Dropdown Values Full`
         ) %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`, `# Unique Values`, `Key Type`)
+        mutate(
+          `Table Name` = Table,
+          `Field Name` = Column,
+          `Total Rows (n)` = rows_total,
+          `Filled (n)` = filled_n,
+          `Missing (n)` = missing_n,
+          `Missing (%)` = pct_missing,
+          `Unique (n)` = unique_n,
+          `Unique (%)` = pct_unique,
+          `Min Value` = min_numeric_or_date,
+          `Max Value` = max_numeric_or_date,
+          `Min Field Length` = min_length,
+          `Max Field Length` = max_length,
+          `Field Types Detected` = data_type_details,
+          `SQL Import Risk` = ifelse(!is.na(any_import_flag) & any_import_flag != "", any_import_flag, "None"),
+          `Import Notes` = notes,
+          `Extract Date` = date_of_extract,
+          `Fields That May Cause Import Errors` = import_error_fields
+        ) %>%
+        select(
+          Table,
+          Column,
+          `Table Name`,
+          `Field Name`,
+          `Field Type`,
+          `Total Rows (n)`,
+          `Filled (n)`,
+          `Missing (n)`,
+          `Missing (%)`,
+          `Unique (n)`,
+          `Unique (%)`,
+          `Example Values`,
+          `Example Values Full`,
+          `Min Value`,
+          `Max Value`,
+          `Min Field Length`,
+          `Max Field Length`,
+          `Field Types Detected`,
+          `SQL Import Risk`,
+          import_flag_type,
+          `Import Notes`,
+          `Extract Date`,
+          `Fields That May Cause Import Errors`,
+          `Key Type`
+        )
       
       # Create display version
       test_app_display <- test_app %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `% Filled`, `# Unique Values`, `Key Type`)
+        mutate(
+          `SQL Import Risk` = ifelse(
+            !is.na(import_flag_type) & import_flag_type != "",
+            str_trim(paste0(`SQL Import Risk`, " ", import_flag_type)),
+            `SQL Import Risk`
+          ),
+          `Missing (%)` = suppressWarnings(round(as.numeric(`Missing (%)`), 1)),
+          `Unique (%)` = suppressWarnings(round(as.numeric(`Unique (%)`), 1))
+        ) %>%
+        select(
+          Table,
+          Column,
+          `Table Name`,
+          `Field Name`,
+          `Field Type`,
+          `Total Rows (n)`,
+          `Filled (n)`,
+          `Missing (n)`,
+          `Missing (%)`,
+          `Unique (n)`,
+          `Unique (%)`,
+          `Example Values`,
+          `Min Value`,
+          `Max Value`,
+          `Min Field Length`,
+          `Max Field Length`,
+          `Field Types Detected`,
+          `SQL Import Risk`,
+          `Import Notes`,
+          `Extract Date`,
+          `Fields That May Cause Import Errors`,
+          `Key Type`
+        )
       
       # Extract relationships (cached)
       table_relationships <- extract_table_relationships()
@@ -1407,9 +1554,16 @@ server <- function(input, output, session) {
     
     data_display <- data_display %>%
       mutate(
-        Table = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_table','%s',{priority:'event'})\">%s</a>", Table, Table),
-        Column = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>", Column, Column)
-      )
+        `Table Name` = sprintf(
+          "<a href='#' onclick=\"Shiny.setInputValue('selected_table','%s',{priority:'event'})\">%s</a>",
+          Table, `Table Name`
+        ),
+        `Field Name` = sprintf(
+          "<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>",
+          Column, `Field Name`
+        )
+      ) %>%
+      select(-Table, -Column, everything())
     datatable(data_display, escape = FALSE, filter = "top", rownames = FALSE,
               class = "stripe hover row-border order-column compact",
               options = list(pageLength = 15, dom = 'tip', scrollX = TRUE))
@@ -1462,18 +1616,25 @@ server <- function(input, output, session) {
       shinyjs::show("edit_column")
       shinyjs::hide("submit_column")
       
-      output$col_name <- renderText({ selected$Column })
-      output$col_type <- renderText({ selected$`Variable Type` })
-      output$col_filled <- renderText({ paste0(selected$`% Filled`, "%") })
-      output$col_unique <- renderText({ selected$`# Unique Values` })
+      output$col_name <- renderText({ format_text_value(selected$`Field Name`) })
+      output$col_type <- renderText({ format_text_value(selected$`Field Type`) })
+      output$col_total_rows <- renderText({ format_count_value(selected$`Total Rows (n)`) })
+      output$col_filled <- renderText({ format_count_value(selected$`Filled (n)`) })
+      output$col_missing_n <- renderText({ format_count_value(selected$`Missing (n)`) })
+      output$col_missing_pct <- renderText({ format_percent_value(selected$`Missing (%)`) })
+      output$col_unique <- renderText({ format_count_value(selected$`Unique (n)`) })
+      output$col_unique_pct <- renderText({ format_percent_value(selected$`Unique (%)`) })
+      output$col_import_risk <- renderText({ format_text_value(selected$`SQL Import Risk`) })
       output$col_default <- renderText({ derive_default() })
-      output$col_values <- renderText({ selected$`Dropdown Values Full` })
+      output$col_values <- renderText({ format_text_value(selected$`Example Values Full`) })
+      output$col_import_notes <- renderText({ format_text_value(selected$`Import Notes`) })
+      output$col_import_errors <- renderText({ format_text_value(selected$`Fields That May Cause Import Errors`) })
     
     output$col_context_text <- renderUI({
       this_tbl <- selected$Table
       tbl_info <- dplyr::filter(data$tables_meta, Table == this_tbl)
       tags$p(HTML(paste0(
-        "<em>You are currently viewing <strong>", selected$Column,
+        "<em>You are currently viewing <strong>", selected$`Field Name`,
         "</strong> in the ",
         "<a href='#' onclick=\"Shiny.setInputValue('selected_table','", this_tbl, "',{priority:'event'})\" ",
         "style='color:#0078D7;text-decoration:none;font-weight:500;'>",
@@ -1580,22 +1741,30 @@ server <- function(input, output, session) {
     output$tbl_rows <- renderText({ format(meta$`# of Table Rows`, big.mark = ",") })
     output$tbl_updated <- renderText({ meta$`Last Updated` %||% "" })
     
-    cols_expanded <- data$test_app_display %>%
+    cols_expanded <- data$test_app %>%
       filter(Table == tbl) %>%
-      select(`Column Name` = Column,
-             `Data Type` = `Variable Type`,
-             `% Filled`,
-             `# Unique Values`,
-             `Key Type`,
-             `Dropdown Values`)
-    
-    cols_expanded$`Column Name` <- sprintf(
+      select(
+        Column,
+        `Field Name`,
+        `Field Type`,
+        `Total Rows (n)`,
+        `Filled (n)`,
+        `Missing (n)`,
+        `Missing (%)`,
+        `Unique (n)`,
+        `Unique (%)`,
+        `SQL Import Risk`,
+        `Key Type`,
+        `Example Values`
+      )
+
+    cols_expanded$`Field Name` <- sprintf(
       "<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>",
-      cols_expanded$`Column Name`, cols_expanded$`Column Name`
+      cols_expanded$Column, cols_expanded$`Field Name`
     )
-    
+
     output$tbl_columns_dt <- renderDT({
-      datatable(cols_expanded, escape = FALSE, rownames = FALSE,
+      datatable(cols_expanded %>% select(-Column), escape = FALSE, rownames = FALSE,
                 filter = "top", class = "stripe hover row-border compact",
                 options = list(pageLength = 12, dom = 'tip', scrollX = TRUE))
     }, server = TRUE)
