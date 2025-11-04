@@ -1229,16 +1229,19 @@ server <- function(input, output, session) {
           field_name = as.character(field_name),
           field_type = as.character(field_type),
           rows = as.numeric(rows_total),
+          filled = as.numeric(filled_n),
           uniques = as.numeric(unique_n),
           blanks = as.numeric(missing_n),
-          fill = ifelse(!is.na(pct_missing), 
+          missing_pct = suppressWarnings(as.numeric(pct_missing)),
+          unique_pct = suppressWarnings(as.numeric(pct_unique)),
+          fill = ifelse(!is.na(pct_missing),
                         1 - as.numeric(pct_missing) / 100,
                         ifelse(!is.na(filled_n) & !is.na(rows_total) & rows_total > 0,
                                as.numeric(filled_n) / as.numeric(rows_total),
                                0)),
           field_desc = notes %||% NA_character_
         ) %>%
-        select(table_name, field_name, field_type, rows, uniques, blanks, fill, field_desc)
+        select(table_name, field_name, field_type, rows, filled, uniques, blanks, missing_pct, unique_pct, fill, field_desc)
       
       # Create tables_meta by aggregating fields_meta
       tables_meta <- fields_meta %>%
@@ -1322,13 +1325,29 @@ server <- function(input, output, session) {
       test_app <- test_app %>%
         mutate(
           `% Filled` = round(as.numeric(fill) * 100, 1),
-          `# Unique Values` = uniques
+          `# Unique Values` = uniques,
+          `Field Type` = field_type,
+          `Total Rows (n)` = rows,
+          `Filled (n)` = filled,
+          `Missing (n)` = blanks,
+          missing_pct_calc = ifelse(!is.na(missing_pct), missing_pct,
+                                     ifelse(!is.na(fill), (1 - fill) * 100, NA_real_)),
+          unique_pct_calc = ifelse(!is.na(unique_pct), unique_pct,
+                                    ifelse(!is.na(rows) & rows > 0 & !is.na(uniques),
+                                           (uniques / rows) * 100, NA_real_)),
+          `Missing (%)` = round(coalesce(missing_pct_calc, 0), 1),
+          `Unique (n)` = uniques,
+          `Unique (%)` = round(coalesce(unique_pct_calc, 0), 1),
+          `Example Values` = drop_values
         ) %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`, `# Unique Values`, `Key Type`)
-      
+        select(Table, Column, `Variable Type`, `Field Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`,
+               `Total Rows (n)`, `Filled (n)`, `Missing (n)`, `Missing (%)`, `Unique (n)`, `Unique (%)`, `# Unique Values`,
+               `Example Values`, `Key Type`)
+
       # Create display version
       test_app_display <- test_app %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `% Filled`, `# Unique Values`, `Key Type`)
+        select(Table, Column, `Variable Type`, `% Filled`, `# Unique Values`, `Key Type`, `Dropdown Values`, `Field Type`,
+               `Total Rows (n)`, `Filled (n)`, `Missing (n)`, `Missing (%)`, `Unique (n)`, `Unique (%)`, `Example Values`)
       
       # Extract relationships (cached)
       table_relationships <- extract_table_relationships()
@@ -1406,10 +1425,25 @@ server <- function(input, output, session) {
     }
     
     data_display <- data_display %>%
+      transmute(
+        `Table Name` = Table,
+        `Field Name` = Column,
+        `Field Type` = `Field Type`,
+        `Total Rows (n)` = `Total Rows (n)`,
+        `Missing (%)` = `Missing (%)`,
+        `Unique (%)` = `Unique (%)`,
+        `Example Values` = `Example Values`,
+        `Filled (n)` = `Filled (n)`,
+        `Missing (n)` = `Missing (n)`,
+        `Unique (n)` = `Unique (n)`
+      ) %>%
       mutate(
-        Table = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_table','%s',{priority:'event'})\">%s</a>", Table, Table),
-        Column = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>", Column, Column)
+        `Table Name` = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_table','%s',{priority:'event'})\">%s</a>",
+                                `Table Name`, `Table Name`),
+        `Field Name` = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>",
+                                `Field Name`, `Field Name`)
       )
+
     datatable(data_display, escape = FALSE, filter = "top", rownames = FALSE,
               class = "stripe hover row-border order-column compact",
               options = list(pageLength = 15, dom = 'tip', scrollX = TRUE))
