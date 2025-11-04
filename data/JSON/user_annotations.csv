@@ -1,0 +1,10 @@
+"entity_type","table_name","column_name","field_name","value","last_updated"
+"table","TestTable","","description","Test description",2025-10-19 21:38:52
+"column","AccountingPeriods","AccountingPeriodId","definition","TBD",2025-10-19 21:49:27
+"column","AccountingPeriods","AccountingPeriodId","notes","TBD",2025-10-19 21:49:28
+"table","AccountingPeriods","","description","TBD",2025-10-19 21:49:45
+"table","AccountingPeriods","","notes","TBD2",2025-10-19 21:49:45
+"table","AdjudicationRules","","description","TBD",2025-10-20 11:12:36
+"table","AdjudicationRules","","notes","TBD",2025-10-20 11:12:37
+"table","Adhoc_AuthorizationCodes","","description","tbd",2025-10-27 10:23:23.90943
+"table","Adhoc_AuthorizationCodes","","notes","tbd",2025-10-27 10:23:24.385324

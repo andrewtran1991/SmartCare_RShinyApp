@@ -1,0 +1,74 @@
+[
+  {
+    "entity_type": "table",
+    "table_name": "TestTable",
+    "column_name": "",
+    "field_name": "description",
+    "value": "Test description",
+    "last_updated": "2025-10-19 21:38:52"
+  },
+  {
+    "entity_type": "column",
+    "table_name": "AccountingPeriods",
+    "column_name": "AccountingPeriodId",
+    "field_name": "definition",
+    "value": "TBD",
+    "last_updated": "2025-10-19 21:49:27"
+  },
+  {
+    "entity_type": "column",
+    "table_name": "AccountingPeriods",
+    "column_name": "AccountingPeriodId",
+    "field_name": "notes",
+    "value": "TBD",
+    "last_updated": "2025-10-19 21:49:28"
+  },
+  {
+    "entity_type": "table",
+    "table_name": "AccountingPeriods",
+    "column_name": "",
+    "field_name": "description",
+    "value": "TBD",
+    "last_updated": "2025-10-19 21:49:45"
+  },
+  {
+    "entity_type": "table",
+    "table_name": "AccountingPeriods",
+    "column_name": "",
+    "field_name": "notes",
+    "value": "TBD2",
+    "last_updated": "2025-10-19 21:49:45"
+  },
+  {
+    "entity_type": "table",
+    "table_name": "AdjudicationRules",
+    "column_name": "",
+    "field_name": "description",
+    "value": "TBD",
+    "last_updated": "2025-10-20 11:12:36"
+  },
+  {
+    "entity_type": "table",
+    "table_name": "AdjudicationRules",
+    "column_name": "",
+    "field_name": "notes",
+    "value": "TBD",
+    "last_updated": "2025-10-20 11:12:37"
+  },
+  {
+    "entity_type": "table",
+    "table_name": "Adhoc_AuthorizationCodes",
+    "column_name": "",
+    "field_name": "description",
+    "value": "tbd",
+    "last_updated": "2025-10-27 10:23:23"
+  },
+  {
+    "entity_type": "table",
+    "table_name": "Adhoc_AuthorizationCodes",
+    "column_name": "",
+    "field_name": "notes",
+    "value": "tbd",
+    "last_updated": "2025-10-27 10:23:24"
+  }
+]
