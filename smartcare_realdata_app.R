@@ -11,6 +11,7 @@ library(tibble)
 library(purrr)
 library(tidyr)
 library(jsonlite)
+library(digest)
 
 # -------------------------------------------------------------------
 # Load SmartCare JSON metadata
@@ -765,11 +766,16 @@ server <- function(input, output, session) {
     password <- input$password_input
     
     if (password == "casrc_internal") {
+      # Show loading notification
+      loading_id <- showNotification("Loading data... Please wait.", 
+                                     type = "message", duration = NULL, id = "loading_data")
+      
       # Load internal data source
       metadata_file <- file.path(data_dir, "metadata_internal_20250826.json")
       metadata_raw <- safe_read_json(metadata_file)
       
       if (is.null(metadata_raw)) {
+        removeNotification(loading_id)
         showNotification("Error: Could not load metadata_internal_20250826.json", type = "error")
         return()
       }
@@ -782,18 +788,21 @@ server <- function(input, output, session) {
         } else if ("data" %in% names(metadata_raw) && is.data.frame(metadata_raw$data)) {
           metadata_raw <- metadata_raw$data
         } else {
+          removeNotification(loading_id)
           showNotification("Error: metadata_internal_20250826.json has unexpected structure", type = "error")
           return()
         }
       }
       
       if (!is.data.frame(metadata_raw)) {
+        removeNotification(loading_id)
         showNotification("Error: metadata_internal_20250826.json is not in the expected format", type = "error")
         return()
       }
       
       # Validate the loaded data
       if (nrow(metadata_raw) == 0) {
+        removeNotification(loading_id)
         showNotification("Error: metadata_internal_20250826.json is empty", type = "error")
         return()
       }
@@ -802,15 +811,23 @@ server <- function(input, output, session) {
       data_source("internal")
       authenticated(TRUE)
       
+      # Remove loading notification
+      removeNotification(loading_id)
+      
       # Show success notification
       showNotification("Successfully loaded internal data source", type = "message", duration = 2)
       
     } else if (password == "casrc") {
+      # Show loading notification
+      loading_id <- showNotification("Loading data... Please wait.", 
+                                     type = "message", duration = NULL, id = "loading_data")
+      
       # Load suppressed data source
       metadata_file <- file.path(data_dir, "metadata_suppressed_20250826.json")
       metadata_raw <- safe_read_json(metadata_file)
       
       if (is.null(metadata_raw)) {
+        removeNotification(loading_id)
         showNotification("Error: Could not load metadata_suppressed_20250826.json", type = "error")
         return()
       }
@@ -823,18 +840,21 @@ server <- function(input, output, session) {
         } else if ("data" %in% names(metadata_raw) && is.data.frame(metadata_raw$data)) {
           metadata_raw <- metadata_raw$data
         } else {
+          removeNotification(loading_id)
           showNotification("Error: metadata_suppressed_20250826.json has unexpected structure", type = "error")
           return()
         }
       }
       
       if (!is.data.frame(metadata_raw)) {
+        removeNotification(loading_id)
         showNotification("Error: metadata_suppressed_20250826.json is not in the expected format", type = "error")
         return()
       }
       
       # Validate the loaded data
       if (nrow(metadata_raw) == 0) {
+        removeNotification(loading_id)
         showNotification("Error: metadata_suppressed_20250826.json is empty", type = "error")
         return()
       }
@@ -842,6 +862,9 @@ server <- function(input, output, session) {
       metadata_internal(as_tibble(metadata_raw))
       data_source("suppressed")
       authenticated(TRUE)
+      
+      # Remove loading notification
+      removeNotification(loading_id)
       
       # Show success notification
       showNotification("Successfully loaded suppressed data source", type = "message", duration = 2)
@@ -852,6 +875,322 @@ server <- function(input, output, session) {
     }
   })
   
+  # Cache for processed data to avoid recalculation
+  processed_data_cache <- reactiveVal(NULL)
+  processed_data_cache_key <- reactiveVal(NULL)
+  
+  # Pre-compute lookups for better performance
+  precompute_lookups <- function(md) {
+    # Pre-compute data types from chatbot data
+    data_types_lookup <- tibble(
+      table_name = character(),
+      field_name = character(),
+      data_type = character()
+    )
+    
+    if (!is.null(sc_chatbot_data) && "tables" %in% names(sc_chatbot_data)) {
+      for (tbl in names(sc_chatbot_data$tables)) {
+        tinfo <- sc_chatbot_data$tables[[tbl]]
+        if (!is.null(tinfo$columns) && is.data.frame(tinfo$columns)) {
+          cols_df <- tinfo$columns
+          if (nrow(cols_df) > 0 && "name" %in% names(cols_df) && "data_type" %in% names(cols_df)) {
+            lookup_rows <- tibble(
+              table_name = tbl,
+              field_name = cols_df$name,
+              data_type = as.character(cols_df$data_type)
+            )
+            data_types_lookup <- bind_rows(data_types_lookup, lookup_rows)
+          }
+        }
+      }
+    }
+    
+    # Pre-compute key types
+    key_types_lookup <- tibble(
+      table_name = character(),
+      field_name = character(),
+      key_type = character()
+    )
+    
+    if (!is.null(sc_chatbot_data) && "tables" %in% names(sc_chatbot_data)) {
+      for (tbl in names(sc_chatbot_data$tables)) {
+        tinfo <- sc_chatbot_data$tables[[tbl]]
+        if (!is.null(tinfo$columns) && is.data.frame(tinfo$columns)) {
+          cols_df <- tinfo$columns
+          if (nrow(cols_df) > 0 && "name" %in% names(cols_df)) {
+            # Primary keys
+            if ("is_primary_key" %in% names(cols_df)) {
+              pk_cols <- cols_df$name[cols_df$is_primary_key == TRUE]
+              if (length(pk_cols) > 0) {
+                key_types_lookup <- bind_rows(key_types_lookup, 
+                  tibble(table_name = tbl, field_name = pk_cols, key_type = "Primary"))
+              }
+            }
+            
+            # Foreign keys
+            if (!is.null(tinfo$foreign_keys)) {
+              fk_cols <- character()
+              if (is.data.frame(tinfo$foreign_keys) && "foreign_keys" %in% names(tinfo$foreign_keys)) {
+                fk_cols <- unique(tinfo$foreign_keys$foreign_keys)
+              } else if (is.list(tinfo$foreign_keys)) {
+                for (fk in tinfo$foreign_keys) {
+                  if (is.list(fk) && !is.null(fk$foreign_keys)) {
+                    fk_cols <- c(fk_cols, fk$foreign_keys)
+                  }
+                }
+              }
+              if (length(fk_cols) > 0) {
+                key_types_lookup <- bind_rows(key_types_lookup,
+                  tibble(table_name = tbl, field_name = fk_cols, key_type = "Foreign"))
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    # Add heuristic-based foreign keys (Id/_id suffix)
+    all_fields <- md %>% select(table_name, field_name) %>% distinct()
+    heuristic_fks <- all_fields %>%
+      filter(str_detect(field_name, "(?i)(Id|_id)$")) %>%
+      anti_join(key_types_lookup, by = c("table_name", "field_name")) %>%
+      mutate(key_type = "Foreign")
+    
+    key_types_lookup <- bind_rows(key_types_lookup, heuristic_fks)
+    
+    # Add "None" for remaining fields
+    all_with_keys <- key_types_lookup %>% select(table_name, field_name)
+    none_keys <- all_fields %>%
+      anti_join(all_with_keys, by = c("table_name", "field_name")) %>%
+      mutate(key_type = "None")
+    
+    key_types_lookup <- bind_rows(key_types_lookup, none_keys)
+    
+    # Pre-compute global codes for GlobalCode type fields (optimized batch processing)
+    global_codes_lookup <- tibble(
+      table_name = character(),
+      field_name = character(),
+      global_codes = character()
+    )
+    
+    # Find all GlobalCode fields - check both field_type and data_types_lookup
+    global_code_fields <- md %>%
+      filter(field_type == "type_GlobalCode") %>%
+      select(table_name, field_name, sample_values)
+    
+    # Also check data_types_lookup if it has entries
+    if (nrow(data_types_lookup) > 0) {
+      chatbot_global_codes <- data_types_lookup %>%
+        filter(data_type == "type_GlobalCode") %>%
+        select(table_name, field_name)
+      
+      additional_fields <- md %>%
+        inner_join(chatbot_global_codes, by = c("table_name", "field_name")) %>%
+        anti_join(global_code_fields %>% select(table_name, field_name), by = c("table_name", "field_name")) %>%
+        select(table_name, field_name, sample_values)
+      
+      global_code_fields <- bind_rows(global_code_fields, additional_fields)
+    }
+    
+    # Batch process global codes lookup if we have fields and global codes data
+    # Skip if there are too many fields (can be slow) - limit to reasonable number
+    max_global_code_fields <- 1000  # Limit to prevent excessive processing time
+    if (nrow(global_code_fields) > 0 && !is.null(sc_global_codes) && nrow(sc_global_codes) > 0) {
+      # Limit the number of fields to process if too many
+      fields_to_process <- nrow(global_code_fields)
+      if (fields_to_process > max_global_code_fields) {
+        global_code_fields <- global_code_fields %>%
+          slice_head(n = max_global_code_fields)
+        # Note: processing limited to first max_global_code_fields fields
+      }
+      
+      # Pre-process global codes once for efficient lookups
+      global_code_id_col <- if ("GlobalCodeId" %in% names(sc_global_codes)) "GlobalCodeId" else names(sc_global_codes)[1]
+      
+      # Create lookup structures for fast matching
+      gc_id_lookup <- if (global_code_id_col %in% names(sc_global_codes)) {
+        if (is.numeric(sc_global_codes[[global_code_id_col]])) {
+          sc_global_codes %>% 
+            select(id = !!sym(global_code_id_col), CodeName) %>%
+            mutate(id_char = as.character(id))
+        } else {
+          sc_global_codes %>% 
+            select(id = !!sym(global_code_id_col), CodeName) %>%
+            mutate(id_char = as.character(id))
+        }
+      } else {
+        tibble(id = character(), CodeName = character(), id_char = character())
+      }
+      
+      gc_code_lookup <- if ("Code" %in% names(sc_global_codes)) {
+        sc_global_codes %>% 
+          select(code = Code, CodeName) %>%
+          mutate(code_char = as.character(code))
+      } else {
+        tibble(code = character(), CodeName = character(), code_char = character())
+      }
+      
+      gc_codename_lookup <- if ("CodeName" %in% names(sc_global_codes)) {
+        sc_global_codes %>% 
+          select(codename = CodeName)
+      } else {
+        tibble(codename = character())
+      }
+      
+      gc_category_lookup <- if ("Category" %in% names(sc_global_codes)) {
+        sc_global_codes %>% 
+          select(category = Category, CodeName, id = !!sym(global_code_id_col))
+      } else {
+        tibble(category = character(), CodeName = character(), id = character())
+      }
+      
+      # Process all fields in batch
+      global_codes_results <- global_code_fields %>%
+        mutate(
+          parsed_values = map_chr(sample_values, parse_sample_values),
+          field_values_list = map(parsed_values, function(pv) {
+            if (pv == "") return(character())
+            strsplit(pv, "; ")[[1]] %>% trimws()
+          })
+        ) %>%
+        filter(map_int(field_values_list, length) > 0)
+      
+      if (nrow(global_codes_results) > 0) {
+        # Optimize: Use vectorized operations where possible
+        # Create a combined lookup for faster matching
+        all_field_values <- unique(unlist(global_codes_results$field_values_list))
+        
+        # Pre-filter lookup tables once for all values
+        gc_id_matches <- if (nrow(gc_id_lookup) > 0 && length(all_field_values) > 0) {
+          numeric_vals <- suppressWarnings(as.numeric(all_field_values))
+          numeric_vals <- numeric_vals[!is.na(numeric_vals)]
+          if (length(numeric_vals) > 0) {
+            gc_id_lookup %>%
+              filter(id %in% numeric_vals | id_char %in% all_field_values)
+          } else {
+            gc_id_lookup %>%
+              filter(id_char %in% all_field_values)
+          }
+        } else {
+          gc_id_lookup %>% slice_head(n = 0)
+        }
+        
+        gc_code_matches <- if (nrow(gc_code_lookup) > 0 && length(all_field_values) > 0) {
+          gc_code_lookup %>%
+            filter(code_char %in% all_field_values)
+        } else {
+          gc_code_lookup %>% slice_head(n = 0)
+        }
+        
+        gc_codename_matches <- if (nrow(gc_codename_lookup) > 0 && length(all_field_values) > 0) {
+          gc_codename_lookup %>%
+            filter(codename %in% all_field_values)
+        } else {
+          gc_codename_lookup %>% slice_head(n = 0)
+        }
+        
+        # Batch process matches using pre-filtered data
+        global_codes_lookup_list <- map(seq_len(nrow(global_codes_results)), function(i) {
+          row <- global_codes_results[i, ]
+          field_vals <- row$field_values_list[[1]]
+          
+          if (length(field_vals) == 0) return(NULL)
+          
+          matching_results <- list()
+          
+          # Strategy 1: Match by GlobalCodeId (use pre-filtered matches)
+          if (nrow(gc_id_matches) > 0) {
+            numeric_vals <- suppressWarnings(as.numeric(field_vals))
+            numeric_vals <- numeric_vals[!is.na(numeric_vals)]
+            matches <- gc_id_matches %>%
+              filter(id %in% numeric_vals | id_char %in% field_vals)
+            if (nrow(matches) > 0) {
+              matching_results[[length(matching_results) + 1]] <- matches
+            }
+          }
+          
+          # Strategy 2: Match by Code (use pre-filtered matches)
+          if (nrow(gc_code_matches) > 0) {
+            matches <- gc_code_matches %>%
+              filter(code_char %in% field_vals)
+            if (nrow(matches) > 0) {
+              matching_results[[length(matching_results) + 1]] <- matches
+            }
+          }
+          
+          # Strategy 3: Match by CodeName (use pre-filtered matches)
+          if (nrow(gc_codename_matches) > 0) {
+            matches <- gc_codename_matches %>%
+              filter(codename %in% field_vals)
+            if (nrow(matches) > 0) {
+              matching_results[[length(matching_results) + 1]] <- matches
+            }
+          }
+          
+          # Strategy 4: Match by Category (column name)
+          if (nrow(gc_category_lookup) > 0) {
+            matches <- gc_category_lookup %>%
+              filter(category == row$field_name)
+            if (nrow(matches) > 0) {
+              matching_results[[length(matching_results) + 1]] <- matches
+            }
+          }
+          
+          # Combine results
+          if (length(matching_results) > 0) {
+            all_matches <- bind_rows(matching_results) %>%
+              distinct()
+            
+            # Get CodeName and ID for formatting
+            if ("CodeName" %in% names(all_matches)) {
+              code_names <- all_matches$CodeName
+            } else {
+              code_names <- rep("", nrow(all_matches))
+            }
+            
+            if (nrow(gc_id_lookup) > 0 && "id" %in% names(all_matches)) {
+              code_ids <- as.character(all_matches$id)
+            } else if (nrow(gc_id_lookup) > 0 && "id_char" %in% names(all_matches)) {
+              code_ids <- all_matches$id_char
+            } else {
+              code_ids <- rep("", length(code_names))
+            }
+            
+            # Format and limit to 20
+            formatted <- paste0(code_ids, ": ", code_names)
+            if (length(formatted) > 20) {
+              formatted <- formatted[1:20]
+            }
+            
+            result_str <- paste(formatted, collapse = "\n")
+            
+            if (result_str != "") {
+              return(tibble(
+                table_name = row$table_name,
+                field_name = row$field_name,
+                global_codes = result_str
+              ))
+            }
+          }
+          
+          return(NULL)
+        })
+        
+        # Combine all results
+        valid_results <- compact(global_codes_lookup_list)
+        if (length(valid_results) > 0) {
+          global_codes_lookup <- bind_rows(valid_results)
+        }
+      }
+    }
+    
+    return(list(
+      data_types = data_types_lookup,
+      key_types = key_types_lookup,
+      global_codes = global_codes_lookup
+    ))
+  }
+  
   # Load and prepare data after authentication
   processed_data <- reactive({
     req(authenticated())
@@ -860,140 +1199,184 @@ server <- function(input, output, session) {
     # Make sure this reactive depends on metadata_internal
     md <- metadata_internal()
     
+    # Check cache
+    cache_key <- digest::digest(md)
+    if (!is.null(processed_data_cache()) && 
+        !is.null(processed_data_cache_key()) && 
+        processed_data_cache_key() == cache_key) {
+      return(processed_data_cache())
+    }
+    
+    # Show loading notification
+    loading_id <- showNotification("Processing data... This may take a moment.", 
+                                   type = "message", duration = NULL, id = "processing_data")
+    
     # Validate that metadata is loaded correctly
     if (is.null(md) || !is.data.frame(md) || nrow(md) == 0) {
+      removeNotification(loading_id)
       showNotification("Error: Metadata is empty or invalid", type = "error")
       return(NULL)
     }
     
-    # Create fields_meta from metadata_internal
-    fields_meta <- as_tibble(md) %>%
-      mutate(
-        table_name = as.character(table_name),
-        field_name = as.character(field_name),
-        field_type = as.character(field_type),
-        rows = as.numeric(rows_total),
-        uniques = as.numeric(unique_n),
-        blanks = as.numeric(missing_n),
-        fill = ifelse(!is.na(pct_missing), 
-                      1 - as.numeric(pct_missing) / 100,
-                      ifelse(!is.na(filled_n) & !is.na(rows_total) & rows_total > 0,
-                             as.numeric(filled_n) / as.numeric(rows_total),
-                             0)),
-        field_desc = notes %||% NA_character_
-      ) %>%
-      select(table_name, field_name, field_type, rows, uniques, blanks, fill, field_desc)
-    
-    # Create tables_meta by aggregating fields_meta
-    tables_meta <- fields_meta %>%
-      group_by(table_name) %>%
-      summarise(
-        `# of Table Cols` = n_distinct(field_name),
-        `# of Table Rows` = max(rows, na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      mutate(
-        Table = table_name,
-        `Table Description` = "",
-        `Last Updated` = ""
-      ) %>%
-      select(Table, `Table Description`, `# of Table Cols`, `# of Table Rows`, `Last Updated`)
-    
-    # Parse sample_values to create dropdown values
-    values_compact <- as_tibble(md) %>%
-      select(table_name, field_name, sample_values) %>%
-      mutate(
-        drop_values = map_chr(sample_values, ~ {
-          parsed <- parse_sample_values(.x)
-          if (parsed != "") {
+    tryCatch({
+      # Pre-compute lookups once
+      lookups <- precompute_lookups(md)
+      
+      # Create fields_meta from metadata_internal
+      fields_meta <- as_tibble(md) %>%
+        mutate(
+          table_name = as.character(table_name),
+          field_name = as.character(field_name),
+          field_type = as.character(field_type),
+          rows = as.numeric(rows_total),
+          uniques = as.numeric(unique_n),
+          blanks = as.numeric(missing_n),
+          fill = ifelse(!is.na(pct_missing), 
+                        1 - as.numeric(pct_missing) / 100,
+                        ifelse(!is.na(filled_n) & !is.na(rows_total) & rows_total > 0,
+                               as.numeric(filled_n) / as.numeric(rows_total),
+                               0)),
+          field_desc = notes %||% NA_character_
+        ) %>%
+        select(table_name, field_name, field_type, rows, uniques, blanks, fill, field_desc)
+      
+      # Create tables_meta by aggregating fields_meta
+      tables_meta <- fields_meta %>%
+        group_by(table_name) %>%
+        summarise(
+          `# of Table Cols` = n_distinct(field_name),
+          `# of Table Rows` = max(rows, na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        mutate(
+          Table = table_name,
+          `Table Description` = "",
+          `Last Updated` = ""
+        ) %>%
+        select(Table, `Table Description`, `# of Table Cols`, `# of Table Rows`, `Last Updated`)
+      
+      # Parse sample_values to create dropdown values (vectorized)
+      values_parsed <- as_tibble(md) %>%
+        select(table_name, field_name, sample_values) %>%
+        mutate(
+          drop_values_parsed = map_chr(sample_values, parse_sample_values),
+          drop_values = map_chr(drop_values_parsed, function(parsed) {
+            if (parsed == "") return("")
             values_list <- strsplit(parsed, "; ")[[1]]
             if (length(values_list) > 10) {
               paste(values_list[1:10], collapse = "; ")
             } else {
               parsed
             }
-          } else {
-            ""
-          }
-        })
-      ) %>%
-      select(table_name, field_name, drop_values)
-    
-    values_full <- as_tibble(md) %>%
-      select(table_name, field_name, sample_values) %>%
-      mutate(
-        drop_values_full = map_chr(sample_values, ~ parse_sample_values(.x))
-      ) %>%
-      select(table_name, field_name, drop_values_full)
-    
-    # Build unified dataset
-    test_app <- fields_meta %>%
-      left_join(tables_meta %>% select(Table, `# of Table Cols`, `# of Table Rows`), by = c("table_name" = "Table")) %>%
-      left_join(values_compact, by = c("table_name", "field_name")) %>%
-      left_join(values_full, by = c("table_name", "field_name")) %>%
-      mutate(
-        Table = table_name,
-        Column = field_name,
-        `Variable Type` = pmap_chr(list(table_name, field_name, field_type), ~ {
-          chatbot_type <- get_data_type_from_chatbot(..1, ..2)
-          if (!is.na(chatbot_type) && chatbot_type != "") chatbot_type else ..3
-        }),
-        `% Filled` = round(as.numeric(fill) * 100, 1),
-        `# Unique Values` = uniques,
-        `Dropdown Values` = pmap_chr(list(table_name, field_name, `Variable Type`, drop_values), ~ {
-          if (!is.na(..3) && ..3 == "type_GlobalCode") {
-            global_codes <- get_global_codes_for_field(..1, ..2, md)
-            if (global_codes != "") global_codes else ..4
-          } else {
-            ..4 %||% ""
-          }
-        }),
-        `Dropdown Values Full` = pmap_chr(list(table_name, field_name, `Variable Type`, drop_values_full), ~ {
-          if (!is.na(..3) && ..3 == "type_GlobalCode") {
-            global_codes <- get_global_codes_for_field(..1, ..2, md)
-            if (global_codes != "") global_codes else ..4
-          } else {
-            ..4 %||% ""
-          }
-        }),
-        `Key Type` = pmap_chr(list(table_name, field_name), ~ infer_key_type(..1, ..2))
-      ) %>%
-      select(Table, Column, `Variable Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`, `# Unique Values`, `Key Type`)
-    
-    # Create display version
-    test_app_display <- test_app %>%
-      select(Table, Column, `Variable Type`, `Dropdown Values`, `% Filled`, `# Unique Values`, `Key Type`)
-    
-    # Extract relationships
-    table_relationships <- extract_table_relationships()
-    if (nrow(table_relationships) == 0) {
-      table_relationships <- tibble(
-        `Source Table` = c("ConcurrentReviews", "ClientMedications", "DocumentVersions", "Staff", "Clients"),
-        `Target Table` = c("Documents", "Medications", "Documents", "Programs", "Staff"),
-        `Foreign Key Column` = c("PreScreenDocumentId", "MedicationId", "DocumentId", "ProgramId", "PrimaryStaffId"),
-        `Relationship Type` = c("parent", "parent", "parent", "parent", "parent"),
-        `Constraint Name` = c("Documents_ConcurrentReviews_FK", "Medications_ClientMedications_FK", "Documents_DocumentVersions_FK", "Programs_Staff_FK", "Staff_Clients_FK"),
-        `Join Type` = c("Many-to-One", "Many-to-One", "Many-to-One", "Many-to-One", "Many-to-One"),
-        `Join Description` = c("ConcurrentReviews.PreScreenDocumentId → Documents.PreScreenDocumentId", 
-                              "ClientMedications.MedicationId → Medications.MedicationId",
-                              "DocumentVersions.DocumentId → Documents.DocumentId",
-                              "Staff.ProgramId → Programs.ProgramId",
-                              "Clients.PrimaryStaffId → Staff.PrimaryStaffId")
+          }),
+          drop_values_full = drop_values_parsed
+        ) %>%
+        select(table_name, field_name, drop_values, drop_values_full)
+      
+      # Build unified dataset with vectorized operations
+      test_app <- fields_meta %>%
+        left_join(tables_meta %>% select(Table, `# of Table Cols`, `# of Table Rows`), by = c("table_name" = "Table")) %>%
+        left_join(values_parsed, by = c("table_name", "field_name")) %>%
+        mutate(
+          Table = table_name,
+          Column = field_name
+        )
+      
+      # Add data types using lookup
+      if (nrow(lookups$data_types) > 0) {
+        test_app <- test_app %>%
+          left_join(lookups$data_types, by = c("table_name", "field_name")) %>%
+          mutate(
+            `Variable Type` = ifelse(!is.na(data_type) & data_type != "", data_type, field_type)
+          ) %>%
+          select(-data_type)
+      } else {
+        test_app <- test_app %>%
+          mutate(`Variable Type` = field_type)
+      }
+      
+      # Add key types using lookup
+      test_app <- test_app %>%
+        left_join(lookups$key_types, by = c("table_name", "field_name")) %>%
+        mutate(`Key Type` = ifelse(!is.na(key_type), key_type, "None")) %>%
+        select(-key_type)
+      
+      # Add global codes using lookup
+      if (nrow(lookups$global_codes) > 0) {
+        test_app <- test_app %>%
+          left_join(lookups$global_codes, by = c("table_name", "field_name")) %>%
+          mutate(
+            `Dropdown Values` = ifelse(!is.na(global_codes) & global_codes != "", global_codes, drop_values %||% ""),
+            `Dropdown Values Full` = ifelse(!is.na(global_codes) & global_codes != "", global_codes, drop_values_full %||% "")
+          ) %>%
+          select(-global_codes)
+      } else {
+        test_app <- test_app %>%
+          mutate(
+            `Dropdown Values` = drop_values %||% "",
+            `Dropdown Values Full` = drop_values_full %||% ""
+          )
+      }
+      
+      # Finalize columns
+      test_app <- test_app %>%
+        mutate(
+          `% Filled` = round(as.numeric(fill) * 100, 1),
+          `# Unique Values` = uniques
+        ) %>%
+        select(Table, Column, `Variable Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`, `# Unique Values`, `Key Type`)
+      
+      # Create display version
+      test_app_display <- test_app %>%
+        select(Table, Column, `Variable Type`, `Dropdown Values`, `% Filled`, `# Unique Values`, `Key Type`)
+      
+      # Extract relationships (cached)
+      table_relationships <- extract_table_relationships()
+      if (nrow(table_relationships) == 0) {
+        table_relationships <- tibble(
+          `Source Table` = c("ConcurrentReviews", "ClientMedications", "DocumentVersions", "Staff", "Clients"),
+          `Target Table` = c("Documents", "Medications", "Documents", "Programs", "Staff"),
+          `Foreign Key Column` = c("PreScreenDocumentId", "MedicationId", "DocumentId", "ProgramId", "PrimaryStaffId"),
+          `Relationship Type` = c("parent", "parent", "parent", "parent", "parent"),
+          `Constraint Name` = c("Documents_ConcurrentReviews_FK", "Medications_ClientMedications_FK", "Documents_DocumentVersions_FK", "Programs_Staff_FK", "Staff_Clients_FK"),
+          `Join Type` = c("Many-to-One", "Many-to-One", "Many-to-One", "Many-to-One", "Many-to-One"),
+          `Join Description` = c("ConcurrentReviews.PreScreenDocumentId → Documents.PreScreenDocumentId", 
+                                "ClientMedications.MedicationId → Medications.MedicationId",
+                                "DocumentVersions.DocumentId → Documents.DocumentId",
+                                "Staff.ProgramId → Programs.ProgramId",
+                                "Clients.PrimaryStaffId → Staff.PrimaryStaffId")
+        )
+      }
+      
+      # Validate processed data
+      if (nrow(test_app) == 0) {
+        removeNotification(loading_id)
+        showNotification("Error: No data processed from metadata", type = "error")
+        return(NULL)
+      }
+      
+      result <- list(
+        test_app = test_app,
+        test_app_display = test_app_display,
+        tables_meta = tables_meta,
+        table_relationships = table_relationships
       )
-    }
-    
-    # Validate processed data
-    if (nrow(test_app) == 0) {
-      showNotification("Error: No data processed from metadata", type = "error")
+      
+      # Cache the result
+      processed_data_cache(result)
+      processed_data_cache_key(cache_key)
+      
+      removeNotification(loading_id)
+      showNotification("Data loaded successfully!", type = "message", duration = 2)
+      
+      return(result)
+      
+    }, error = function(e) {
+      removeNotification(loading_id)
+      showNotification(paste("Error processing data:", e$message), type = "error", duration = 5)
+      cat("Error in processed_data:", e$message, "\n")
       return(NULL)
-    }
-    
-    return(list(
-      test_app = test_app,
-      test_app_display = test_app_display,
-      tables_meta = tables_meta,
-      table_relationships = table_relationships
-    ))
+    })
   })
   
   # Reactive value to track current column
