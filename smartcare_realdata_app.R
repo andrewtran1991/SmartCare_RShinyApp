@@ -488,8 +488,6 @@ extract_table_relationships <- function() {
   return(relationships_df)
 }
 
-derive_default <- function() sample(c("NULL", "N/A", "Unknown", "0"), 1)
-
 # =====================================================
 # UI
 # =====================================================
@@ -646,7 +644,69 @@ ui <- fluidPage(
         .subtle-line { color:#6c757d; font-style:italic; margin-top:-6px; margin-bottom:10px; }
         .section-title { font-weight:600; color:#00356b; margin-top:22px; }
         .info-box { background:#f8f9fa; padding:10px 15px; border-radius:8px; margin-top:8px; }
-        .summary-grid { background:#f8f9fa; padding:15px; border-radius:8px; margin-bottom:18px; }
+        .summary-grid {
+          background:#f8f9fa;
+          padding:18px;
+          border-radius:12px;
+          margin-bottom:20px;
+          display:grid;
+          grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+          gap:12px;
+        }
+        .summary-group-title {
+          grid-column:1 / -1;
+          font-weight:600;
+          color:#00356b;
+          margin-top:4px;
+          margin-bottom:2px;
+          text-transform:uppercase;
+          font-size:13px;
+          letter-spacing:0.6px;
+        }
+        .summary-item {
+          background:#fff;
+          border-radius:10px;
+          padding:12px 16px;
+          box-shadow:0 1px 4px rgba(0,0,0,0.08);
+          display:flex;
+          flex-direction:column;
+          gap:6px;
+        }
+        .summary-item-label {
+          font-size:12px;
+          text-transform:uppercase;
+          letter-spacing:0.5px;
+          color:#6c757d;
+        }
+        .summary-item-value {
+          font-size:16px;
+          font-weight:600;
+          color:#00356b;
+          word-break:break-word;
+          white-space:pre-wrap;
+        }
+        .summary-item-full { grid-column:1 / -1; }
+        .summary-item-value details {
+          background:#eef2f8;
+          padding:10px 12px;
+          border-radius:8px;
+        }
+        .summary-item-value details summary {
+          cursor:pointer;
+          font-weight:600;
+          color:#00356b;
+          list-style:none;
+        }
+        .summary-item-value details summary::-webkit-details-marker { display:none; }
+        .summary-item-value details summary::after {
+          content:"\25BC";
+          float:right;
+          transform:rotate(0deg);
+          transition:transform 0.2s ease;
+        }
+        .summary-item-value details[open] summary::after {
+          transform:rotate(180deg);
+        }
         .quick-jump { width:80%; margin: 0 auto 10px auto; }
       "))),
       
@@ -663,17 +723,7 @@ ui <- fluidPage(
           uiOutput("col_context_text"),
           tags$hr(),
           
-          div(class = "summary-grid",
-              fluidRow(
-                column(3, div(class = "info-box", strong("Data Type:"), br(), textOutput("col_type"))),
-                column(3, div(class = "info-box", strong("% Filled:"), br(), textOutput("col_filled"))),
-                column(3, div(class = "info-box", strong("# Unique Values:"), br(), textOutput("col_unique"))),
-                column(3, div(class = "info-box", strong("Default Value:"), br(), textOutput("col_default")))
-              ),
-              fluidRow(
-                column(12, div(class = "info-box", strong("Dropdown Values:"), br(), textOutput("col_values")))
-              )
-          ),
+          uiOutput("column_overview"),
           
           div(class = "section-title", "Column Definition"),
           textAreaInput("col_def", NULL,
@@ -1228,17 +1278,31 @@ server <- function(input, output, session) {
           table_name = as.character(table_name),
           field_name = as.character(field_name),
           field_type = as.character(field_type),
-          rows = as.numeric(rows_total),
-          uniques = as.numeric(unique_n),
-          blanks = as.numeric(missing_n),
-          fill = ifelse(!is.na(pct_missing), 
-                        1 - as.numeric(pct_missing) / 100,
+          rows = suppressWarnings(as.numeric(rows_total)),
+          uniques = suppressWarnings(as.numeric(unique_n)),
+          blanks = suppressWarnings(as.numeric(missing_n)),
+          fill = ifelse(!is.na(pct_missing),
+                        1 - suppressWarnings(as.numeric(pct_missing)) / 100,
                         ifelse(!is.na(filled_n) & !is.na(rows_total) & rows_total > 0,
-                               as.numeric(filled_n) / as.numeric(rows_total),
+                               suppressWarnings(as.numeric(filled_n)) / suppressWarnings(as.numeric(rows_total)),
                                0)),
-          field_desc = notes %||% NA_character_
+          field_desc = notes %||% NA_character_,
+          filled_n = suppressWarnings(as.numeric(filled_n)),
+          missing_n = suppressWarnings(as.numeric(missing_n)),
+          missing_pct = suppressWarnings(as.numeric(pct_missing)),
+          unique_pct = suppressWarnings(as.numeric(pct_unique)),
+          min_value = na_if(as.character(min_numeric_or_date), ""),
+          max_value = na_if(as.character(max_numeric_or_date), ""),
+          min_length = suppressWarnings(as.numeric(min_length)),
+          max_length = suppressWarnings(as.numeric(max_length)),
+          detected_types = na_if(as.character(more_than_one_data_type), ""),
+          import_flag_type = na_if(as.character(import_flag_type), ""),
+          import_notes = na_if(as.character(notes), ""),
+          example_values = na_if(as.character(sample_values), "")
         ) %>%
-        select(table_name, field_name, field_type, rows, uniques, blanks, fill, field_desc)
+        select(table_name, field_name, field_type, rows, uniques, blanks, fill, field_desc,
+               filled_n, missing_n, missing_pct, unique_pct, min_value, max_value,
+               min_length, max_length, detected_types, import_flag_type, import_notes, example_values)
       
       # Create tables_meta by aggregating fields_meta
       tables_meta <- fields_meta %>%
@@ -1463,11 +1527,133 @@ server <- function(input, output, session) {
       shinyjs::hide("submit_column")
       
       output$col_name <- renderText({ selected$Column })
-      output$col_type <- renderText({ selected$`Variable Type` })
-      output$col_filled <- renderText({ paste0(selected$`% Filled`, "%") })
-      output$col_unique <- renderText({ selected$`# Unique Values` })
-      output$col_default <- renderText({ derive_default() })
-      output$col_values <- renderText({ selected$`Dropdown Values Full` })
+
+      output$column_overview <- renderUI({
+        req(selected)
+
+        ds <- data_source() %||% ""
+
+        format_number <- function(x) {
+          if (is.null(x) || length(x) == 0) return("—")
+          num <- suppressWarnings(as.numeric(x[1]))
+          if (is.na(num)) return("—")
+          format(num, big.mark = ",", trim = TRUE, scientific = FALSE)
+        }
+
+        format_percent <- function(x) {
+          if (is.null(x) || length(x) == 0) return("—")
+          num <- suppressWarnings(as.numeric(x[1]))
+          if (is.na(num)) return("—")
+          formatted <- sprintf("%.1f", round(num, 1))
+          formatted <- sub("\\.0$", "", formatted)
+          paste0(formatted, "%")
+        }
+
+        value_or_dash <- function(x) {
+          if (is.null(x) || length(x) == 0) return("—")
+          val <- as.character(x[1])
+          if (is.na(val) || trimws(val) == "") return("—")
+          val
+        }
+
+        summary_item <- function(label, value, full_width = FALSE) {
+          classes <- "summary-item"
+          if (isTRUE(full_width)) {
+            classes <- paste(classes, "summary-item-full")
+          }
+          tags$div(
+            class = classes,
+            tags$div(class = "summary-item-label", label),
+            tags$div(class = "summary-item-value", value)
+          )
+        }
+
+        example_values_text <- value_or_dash(selected$example_values)
+        example_values_display <- if (example_values_text == "—") {
+          example_values_text
+        } else {
+          tags$details(
+            tags$summary("Show example values"),
+            tags$p(example_values_text)
+          )
+        }
+
+        dropdown_values_text <- value_or_dash(selected$`Dropdown Values Full`)
+        dropdown_values_display <- if (dropdown_values_text == "—") {
+          dropdown_values_text
+        } else {
+          tags$details(
+            tags$summary("Show dropdown values"),
+            tags$p(dropdown_values_text)
+          )
+        }
+
+        import_notes_text <- value_or_dash(selected$import_notes)
+        import_notes_display <- if (import_notes_text == "—") {
+          import_notes_text
+        } else {
+          tags$details(
+            tags$summary("View import notes"),
+            tags$p(import_notes_text)
+          )
+        }
+
+        overview_items <- list(
+          tags$div(class = "summary-group-title", "Field Overview"),
+          summary_item("Table Name", value_or_dash(selected$Table)),
+          summary_item("Field Name", value_or_dash(selected$Column)),
+          summary_item("Field Type", value_or_dash(selected$field_type)),
+          summary_item("Field Types Detected", value_or_dash(selected$detected_types))
+        )
+
+        coverage_items <- list(
+          tags$div(class = "summary-group-title", "Data Coverage"),
+          summary_item("Total Rows (n)", format_number(selected$rows)),
+          summary_item("Filled (n)", format_number(selected$filled_n)),
+          summary_item("Missing (n)", format_number(selected$missing_n)),
+          summary_item("Missing (%)", format_percent(selected$missing_pct)),
+          summary_item("Unique (n)", format_number(selected$uniques)),
+          summary_item("Unique (%)", format_percent(selected$unique_pct))
+        )
+
+        values_items <- list(
+          tags$div(class = "summary-group-title", "Values & Length"),
+          summary_item("Example Values", example_values_display, full_width = TRUE)
+        )
+
+        if (dropdown_values_text != "—") {
+          values_items <- c(values_items, list(summary_item("Dropdown Values", dropdown_values_display, full_width = TRUE)))
+        }
+
+        if (identical(ds, "internal")) {
+          values_items <- c(
+            values_items,
+            list(
+              summary_item("Min Value", value_or_dash(selected$min_value)),
+              summary_item("Max Value", value_or_dash(selected$max_value))
+            )
+          )
+        }
+
+        values_items <- c(
+          values_items,
+          list(
+            summary_item("Min Field Length", format_number(selected$min_length)),
+            summary_item("Max Field Length", format_number(selected$max_length))
+          )
+        )
+
+        import_items <- list(
+          tags$div(class = "summary-group-title", "Import Status"),
+          summary_item("Import Flag Type", value_or_dash(selected$import_flag_type)),
+          summary_item("Import Notes", import_notes_display, full_width = TRUE)
+        )
+
+        tags$div(
+          class = "summary-grid",
+          do.call(tagList, c(overview_items, coverage_items, values_items, import_items))
+        )
+      })
     
     output$col_context_text <- renderUI({
       this_tbl <- selected$Table
