@@ -581,6 +581,9 @@ ui <- fluidPage(
         .search-bar { width:60%; margin: 0 auto 10px auto; }
         .import-note { text-align:center; color:#6c757d; font-style:italic; margin-bottom: 16px; }
         .shiny-notification { border-radius: 8px; }
+        .import-flag { display:inline-block; padding:4px 10px; border-radius:16px; font-size:12px; font-weight:500; }
+        .import-flag-risk { background-color:#f8d7da; color:#721c24; }
+        .import-flag-ok { background-color:#e2e3e5; color:#41464b; font-style:italic; }
       "))),
       div(class = "search-bar",
           textInput("global_search", label = NULL,
@@ -1274,9 +1277,18 @@ server <- function(input, output, session) {
         select(table_name, field_name, drop_values, drop_values_full)
       
       # Build unified dataset with vectorized operations
+      flag_details <- as_tibble(md) %>%
+        transmute(
+          table_name = as.character(table_name),
+          field_name = as.character(field_name),
+          any_import_flag = tolower(as.character(any_import_flag)) == "true",
+          import_flag_type = as.character(import_flag_type)
+        )
+
       test_app <- fields_meta %>%
         left_join(tables_meta %>% select(Table, `# of Table Cols`, `# of Table Rows`), by = c("table_name" = "Table")) %>%
         left_join(values_parsed, by = c("table_name", "field_name")) %>%
+        left_join(flag_details, by = c("table_name", "field_name")) %>%
         mutate(
           Table = table_name,
           Column = field_name
@@ -1321,14 +1333,25 @@ server <- function(input, output, session) {
       # Finalize columns
       test_app <- test_app %>%
         mutate(
+          any_import_flag = ifelse(is.na(any_import_flag), FALSE, any_import_flag),
+          import_flag_type = ifelse(
+            is.na(import_flag_type) | import_flag_type == "",
+            ifelse(any_import_flag, "Risk for SQL import issues", "No import issues detected."),
+            import_flag_type
+          ),
           `% Filled` = round(as.numeric(fill) * 100, 1),
-          `# Unique Values` = uniques
+          `# Unique Values` = uniques,
+          `SQL Import Risk` = ifelse(
+            any_import_flag,
+            import_flag_type,
+            ifelse(import_flag_type == "", "No import issues detected.", import_flag_type)
+          )
         ) %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`, `# Unique Values`, `Key Type`)
-      
+        select(Table, Column, `Variable Type`, `Dropdown Values`, `Dropdown Values Full`, `% Filled`, `# Unique Values`, `Key Type`, any_import_flag, `SQL Import Risk`)
+
       # Create display version
       test_app_display <- test_app %>%
-        select(Table, Column, `Variable Type`, `Dropdown Values`, `% Filled`, `# Unique Values`, `Key Type`)
+        select(Table, Column, `Variable Type`, `Dropdown Values`, `% Filled`, `# Unique Values`, `Key Type`, `SQL Import Risk`)
       
       # Extract relationships (cached)
       table_relationships <- extract_table_relationships()
@@ -1408,7 +1431,12 @@ server <- function(input, output, session) {
     data_display <- data_display %>%
       mutate(
         Table = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_table','%s',{priority:'event'})\">%s</a>", Table, Table),
-        Column = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>", Column, Column)
+        Column = sprintf("<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>", Column, Column),
+        `SQL Import Risk` = ifelse(
+          `SQL Import Risk` == "No import issues detected." | is.na(`SQL Import Risk`) | `SQL Import Risk` == "",
+          sprintf("<span class='import-flag import-flag-ok'>%s</span>", "No import issues detected."),
+          sprintf("<span class='import-flag import-flag-risk'>%s</span>", `SQL Import Risk`)
+        )
       )
     datatable(data_display, escape = FALSE, filter = "top", rownames = FALSE,
               class = "stripe hover row-border order-column compact",
@@ -1587,7 +1615,8 @@ server <- function(input, output, session) {
              `% Filled`,
              `# Unique Values`,
              `Key Type`,
-             `Dropdown Values`)
+             `Dropdown Values`,
+             `SQL Import Risk`)
     
     cols_expanded$`Column Name` <- sprintf(
       "<a href='#' onclick=\"Shiny.setInputValue('selected_column','%s',{priority:'event'})\">%s</a>",
