@@ -14,6 +14,41 @@ library(jsonlite)
 library(digest)
 
 # -------------------------------------------------------------------
+# Disk cache helpers for processed metadata
+# -------------------------------------------------------------------
+ensure_cache_dir <- function() {
+  cache_dir <- file.path(data_dir, "cache")
+  if (!dir.exists(cache_dir)) {
+    dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+  }
+  cache_dir
+}
+
+metadata_cache_path <- function(metadata_file, cache_key) {
+  cache_dir <- ensure_cache_dir()
+  cache_name <- paste0(tools::file_path_sans_ext(basename(metadata_file)),
+                       "_", cache_key, "_processed.rds")
+  file.path(cache_dir, cache_name)
+}
+
+load_processed_cache <- function(metadata_file, cache_key) {
+  cache_path <- metadata_cache_path(metadata_file, cache_key)
+  if (file.exists(cache_path)) {
+    tryCatch(readRDS(cache_path), error = function(e) NULL)
+  } else {
+    NULL
+  }
+}
+
+save_processed_cache <- function(result, metadata_file, cache_key) {
+  cache_path <- metadata_cache_path(metadata_file, cache_key)
+  tryCatch(saveRDS(result, cache_path), error = function(e) {
+    message("Failed to save processed metadata cache: ", e$message)
+    NULL
+  })
+}
+
+# -------------------------------------------------------------------
 # Load SmartCare JSON metadata
 # -------------------------------------------------------------------
 IMPORT_DATE <- format(Sys.Date(), "%B %d, %Y")
@@ -738,12 +773,14 @@ ui <- fluidPage(
 # SERVER
 # =====================================================
 server <- function(input, output, session) {
-  
+
   # Authentication state
   authenticated <- reactiveVal(FALSE)
   data_source <- reactiveVal(NULL)  # Will be "internal" or "suppressed"
   metadata_internal <- reactiveVal(NULL)
-  
+  processed_data_cache <- reactiveVal(NULL)
+  processed_data_cache_key <- reactiveVal(NULL)
+
   # Show/hide login page
   output$showLogin <- reactive(!authenticated())
   outputOptions(output, "showLogin", suspendWhenHidden = FALSE)
@@ -767,9 +804,9 @@ server <- function(input, output, session) {
     
     if (password == "casrc_internal") {
       # Show loading notification
-      loading_id <- showNotification("Loading data... Please wait.", 
+      loading_id <- showNotification("Loading data... Please wait.",
                                      type = "message", duration = NULL, id = "loading_data")
-      
+
       # Load internal data source
       metadata_file <- file.path(data_dir, "metadata_internal_20250826.json")
       metadata_raw <- safe_read_json(metadata_file)
@@ -806,11 +843,21 @@ server <- function(input, output, session) {
         showNotification("Error: metadata_internal_20250826.json is empty", type = "error")
         return()
       }
-      
-      metadata_internal(as_tibble(metadata_raw))
+
+      metadata_tbl <- as_tibble(metadata_raw)
+      metadata_internal(metadata_tbl)
+      cache_key <- digest::digest(metadata_tbl, algo = "xxhash64")
+      cached_result <- load_processed_cache(metadata_file, cache_key)
+      if (!is.null(cached_result)) {
+        processed_data_cache(cached_result)
+        processed_data_cache_key(cache_key)
+      } else {
+        processed_data_cache(NULL)
+        processed_data_cache_key(NULL)
+      }
       data_source("internal")
       authenticated(TRUE)
-      
+
       # Remove loading notification
       removeNotification(loading_id)
       
@@ -819,9 +866,9 @@ server <- function(input, output, session) {
       
     } else if (password == "casrc") {
       # Show loading notification
-      loading_id <- showNotification("Loading data... Please wait.", 
+      loading_id <- showNotification("Loading data... Please wait.",
                                      type = "message", duration = NULL, id = "loading_data")
-      
+
       # Load suppressed data source
       metadata_file <- file.path(data_dir, "metadata_suppressed_20250826.json")
       metadata_raw <- safe_read_json(metadata_file)
@@ -858,11 +905,21 @@ server <- function(input, output, session) {
         showNotification("Error: metadata_suppressed_20250826.json is empty", type = "error")
         return()
       }
-      
-      metadata_internal(as_tibble(metadata_raw))
+
+      metadata_tbl <- as_tibble(metadata_raw)
+      metadata_internal(metadata_tbl)
+      cache_key <- digest::digest(metadata_tbl, algo = "xxhash64")
+      cached_result <- load_processed_cache(metadata_file, cache_key)
+      if (!is.null(cached_result)) {
+        processed_data_cache(cached_result)
+        processed_data_cache_key(cache_key)
+      } else {
+        processed_data_cache(NULL)
+        processed_data_cache_key(NULL)
+      }
       data_source("suppressed")
       authenticated(TRUE)
-      
+
       # Remove loading notification
       removeNotification(loading_id)
       
@@ -874,11 +931,7 @@ server <- function(input, output, session) {
       return()
     }
   })
-  
-  # Cache for processed data to avoid recalculation
-  processed_data_cache <- reactiveVal(NULL)
-  processed_data_cache_key <- reactiveVal(NULL)
-  
+
   # Pre-compute lookups for better performance
   precompute_lookups <- function(md) {
     # Pre-compute data types from chatbot data
@@ -1200,9 +1253,9 @@ server <- function(input, output, session) {
     md <- metadata_internal()
     
     # Check cache
-    cache_key <- digest::digest(md)
-    if (!is.null(processed_data_cache()) && 
-        !is.null(processed_data_cache_key()) && 
+    cache_key <- digest::digest(md, algo = "xxhash64")
+    if (!is.null(processed_data_cache()) &&
+        !is.null(processed_data_cache_key()) &&
         processed_data_cache_key() == cache_key) {
       return(processed_data_cache())
     }
@@ -1361,11 +1414,21 @@ server <- function(input, output, session) {
         tables_meta = tables_meta,
         table_relationships = table_relationships
       )
-      
+
       # Cache the result
       processed_data_cache(result)
       processed_data_cache_key(cache_key)
-      
+      metadata_file <- if (identical(data_source(), "internal")) {
+        file.path(data_dir, "metadata_internal_20250826.json")
+      } else if (identical(data_source(), "suppressed")) {
+        file.path(data_dir, "metadata_suppressed_20250826.json")
+      } else {
+        NULL
+      }
+      if (!is.null(metadata_file)) {
+        save_processed_cache(result, metadata_file, cache_key)
+      }
+
       removeNotification(loading_id)
       showNotification("Data loaded successfully!", type = "message", duration = 2)
       
