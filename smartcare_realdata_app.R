@@ -490,6 +490,24 @@ extract_table_relationships <- function() {
 
 derive_default <- function() sample(c("NULL", "N/A", "Unknown", "0"), 1)
 
+data_notes_footnote <- tags$div(
+  class = "app-footnote",
+  tags$hr(),
+  tags$div(tags$strong("Data Notes")),
+  tags$p(
+    tags$strong("Sampling:"),
+    " For tables with more than 1 million rows, a 1 million-row sample is analyzed to ensure efficient processing. Counts are omitted when data are sampled."
+  ),
+  tags$p(
+    tags$strong("Example Values — Internal (casrc_internal password route):"),
+    " The top 20 most frequent values are displayed. Frequencies are not calculated for long text fields or when more than 95% of values are unique."
+  ),
+  tags$p(
+    tags$strong("Example Values — Suppressed (casrc password route):"),
+    " Example values are hidden to protect PHI, except for fields containing global codes or logical values. All values remain visible in the internal app."
+  )
+)
+
 # =====================================================
 # UI
 # =====================================================
@@ -499,10 +517,10 @@ ui <- fluidPage(
   
   tags$head(tags$style(HTML("
     body { background-color: #f5f6f7; font-family: 'Helvetica Neue', sans-serif; }
-    .login-container { 
-      display: flex; 
-      justify-content: center; 
-      align-items: center; 
+    .login-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
       min-height: 100vh; 
       padding: 20px;
     }
@@ -544,6 +562,19 @@ ui <- fluidPage(
       padding: 12px;
       margin-bottom: 20px;
       font-size: 14px;
+    }
+    .app-footnote {
+      width: 95%;
+      margin: 30px auto 20px auto;
+      font-size: 12px;
+      color: #6c757d;
+      line-height: 1.5;
+    }
+    .app-footnote hr {
+      margin-top: 0;
+    }
+    .app-footnote strong {
+      color: #00356b;
     }
   "))),
   
@@ -587,7 +618,8 @@ ui <- fluidPage(
                     placeholder = "🔍 Search across all columns (table, column, values)...", width = "100%")
       ),
       div(class = "import-note", paste("Date of Data Import:", IMPORT_DATE)),
-      div(class = "datatable-card", DTOutput("results"))
+      div(class = "datatable-card", DTOutput("results")),
+      data_notes_footnote
     )
   ),
   
@@ -609,18 +641,18 @@ ui <- fluidPage(
           h3(textOutput("tbl_header")),
           div(class = "subtle-line", paste("Date of Data Import:", IMPORT_DATE)),
           tags$hr(),
-          
+
           div(class = "section-title", "Table Description"),
           textAreaInput("tbl_desc", NULL, "", width = "100%", height = "70px"),
-          
+
           div(class = "section-title", "Table Notes"),
           textAreaInput("tbl_notes", NULL, "", width = "100%", height = "70px"),
-          
+
           div(style = "margin-top: 10px;",
               actionButton("edit_table", "Edit", class = "btn-primary"),
               actionButton("submit_table", "Submit", class = "btn-success", style = "display:none;")
           ),
-          
+
           div(class = "summary-grid",
               fluidRow(
                 column(4, div(class = "info-box", strong("# of Columns:"), br(), textOutput("tbl_cols"))),
@@ -628,10 +660,11 @@ ui <- fluidPage(
                 column(4, div(class = "info-box", strong("Last Updated:"), br(), textOutput("tbl_updated")))
               )
           ),
-          
+
           div(class = "section-title", "Column-Level Details"),
           DTOutput("tbl_columns_dt")
-      )
+      ),
+      data_notes_footnote
     )
   ),
   
@@ -690,7 +723,8 @@ ui <- fluidPage(
           
           div(class = "section-title", "Other Tables Where This Column Appears"),
           uiOutput("related_tables")
-      )
+      ),
+      data_notes_footnote
     )
   ),
   
@@ -727,7 +761,8 @@ ui <- fluidPage(
           )
       ),
       
-      div(class = "datatable-card", DTOutput("relationships_table"))
+      div(class = "datatable-card", DTOutput("relationships_table")),
+      data_notes_footnote
     )
   )
     )
