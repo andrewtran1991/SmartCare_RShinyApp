@@ -279,6 +279,30 @@ parse_sample_values <- function(sample_str) {
   return(paste(values, collapse = "; "))
 }
 
+# Parse sample_values into a data frame with value, count (n) and percent
+parse_sample_values_df <- function(sample_str) {
+  if (is.na(sample_str) || sample_str == "" || is.null(sample_str)) {
+    return(tibble(value = character(), n = numeric(), pct = numeric()))
+  }
+  entries <- strsplit(as.character(sample_str), ";")[[1]]
+  results <- lapply(entries, function(entry) {
+    entry <- trimws(entry)
+    # Remove trailing " + others"
+    entry <- stringr::str_replace(entry, " \\+ others.*$", "")
+    # Try to capture patterns like: X (n = 10, 12.3%)
+    m <- stringr::str_match(entry, "^([^\\(]+)\\s*\\(n\\s*=\\s*([0-9,]+)\\s*,\\s*([0-9.]+)%\\)\\s*$")
+    if (!is.na(m[1,1])) {
+      val <- trimws(m[1,2])
+      n <- suppressWarnings(as.numeric(gsub(",", "", m[1,3])))
+      pct <- suppressWarnings(as.numeric(m[1,4]))
+      return(tibble(value = val, n = n, pct = pct))
+    }
+    # Fallback: value only
+    tibble(value = trimws(entry), n = NA_real_, pct = NA_real_)
+  })
+  bind_rows(results) %>% filter(!is.na(value) & value != "")
+}
+
 format_count_value <- function(x) {
   if (is.null(x) || length(x) == 0) {
     return("—")
@@ -676,12 +700,18 @@ ui <- fluidPage(
         .search-bar { width:60%; margin: 0 auto 10px auto; }
         .import-note { text-align:center; color:#6c757d; font-style:italic; margin-bottom: 16px; }
         .shiny-notification { border-radius: 8px; }
+        .risk-badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:500; }
+        .risk-none { background:#e2e3e5; color:#383d41; }
+        .risk-low { background:#d1ecf1; color:#0c5460; }
+        .risk-medium { background:#fff3cd; color:#856404; }
+        .risk-high { background:#f8d7da; color:#721c24; }
+        .risk-unknown { background:#e2e3e5; color:#383d41; }
       "))),
       div(class = "search-bar",
           textInput("global_search", label = NULL,
                     placeholder = "🔍 Search across all columns (table, column, values)...", width = "100%")
       ),
-      div(class = "import-note", paste("Date of Data Import:", IMPORT_DATE)),
+      div(class = "import-note", textOutput("extract_date_all")),
       div(class = "datatable-card", DTOutput("results")),
       data_notes_footnote
     )
@@ -699,11 +729,17 @@ ui <- fluidPage(
         .section-title { font-weight:600; color:#00356b; margin-top:22px; }
         .info-box { background:#f8f9fa; padding:10px 15px; border-radius:8px; margin-top:8px; }
         .summary-grid { background:#f8f9fa; padding:15px; border-radius:8px; margin-bottom:18px; }
+        .risk-badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:500; }
+        .risk-none { background:#e2e3e5; color:#383d41; }
+        .risk-low { background:#d1ecf1; color:#0c5460; }
+        .risk-medium { background:#fff3cd; color:#856404; }
+        .risk-high { background:#f8d7da; color:#721c24; }
+        .risk-unknown { background:#e2e3e5; color:#383d41; }
       "))),
       
       div(class = "detail-card",
           h3(textOutput("tbl_header")),
-          div(class = "subtle-line", paste("Date of Data Import:", IMPORT_DATE)),
+          div(class = "subtle-line", textOutput("extract_date_table")),
           tags$hr(),
 
           div(class = "section-title", "Table Description"),
@@ -722,6 +758,11 @@ ui <- fluidPage(
                 column(4, div(class = "info-box", strong("# of Columns:"), br(), textOutput("tbl_cols"))),
                 column(4, div(class = "info-box", strong("# of Rows:"), br(), textOutput("tbl_rows"))),
                 column(4, div(class = "info-box", strong("Last Updated:"), br(), textOutput("tbl_updated")))
+              )
+          ),
+          div(class = "summary-grid",
+              fluidRow(
+                column(4, div(class = "info-box", strong("SQL Import Risk:"), br(), uiOutput("tbl_import_risk")))
               )
           ),
 
@@ -756,7 +797,7 @@ ui <- fluidPage(
       
       div(class = "detail-card",
           h3(textOutput("col_name")),
-          div(class = "subtle-line", paste("Date of Data Import:", IMPORT_DATE)),
+          div(class = "subtle-line", textOutput("extract_date_column")),
           uiOutput("col_context_text"),
           tags$hr(),
           
@@ -764,23 +805,33 @@ ui <- fluidPage(
               fluidRow(
                 column(3, div(class = "info-box", strong("Field Type:"), br(), textOutput("col_type"))),
                 column(3, div(class = "info-box", strong("Total Rows (n):"), br(), textOutput("col_total_rows"))),
+                column(3, div(class = "info-box", strong("Fill (%):"), br(), textOutput("col_fill_rate"))),
+                column(3, div(class = "info-box", strong("Missing (%):"), br(), textOutput("col_missing_pct")))
+              ),
+              fluidRow(
                 column(3, div(class = "info-box", strong("Filled (n):"), br(), textOutput("col_filled"))),
-                column(3, div(class = "info-box", strong("Missing (n):"), br(), textOutput("col_missing_n")))
-              ),
-              fluidRow(
-                column(3, div(class = "info-box", strong("Missing (%):"), br(), textOutput("col_missing_pct"))),
+                column(3, div(class = "info-box", strong("Missing (n):"), br(), textOutput("col_missing_n"))),
                 column(3, div(class = "info-box", strong("Unique (n):"), br(), textOutput("col_unique"))),
-                column(3, div(class = "info-box", strong("Unique (%):"), br(), textOutput("col_unique_pct"))),
-                column(3, div(class = "info-box", strong("SQL Import Risk:"), br(), textOutput("col_import_risk")))
+                column(3, div(class = "info-box", strong("Unique (%):"), br(), textOutput("col_unique_pct")))
               ),
+              uiOutput("col_value_range_section"),
               fluidRow(
-                column(12, div(class = "info-box", strong("Example Values:"), br(), textOutput("col_values")))
+                column(12,
+                  tags$details(
+                    tags$summary("Example Values"),
+                    div(class = "info-box", strong("Example Values (compact):"), br(), textOutput("col_values_compact")),
+                    div(class = "info-box", strong("Example Values (full):"), br(), textOutput("col_values_full")),
+                    div(style = "margin-top:8px;",
+                        actionLink("open_examples", label = "Open Example Values Table"))
+                  )
+                )
               ),
               fluidRow(
                 column(12, div(class = "info-box", strong("Default Value:"), br(), textOutput("col_default")))
               ),
               fluidRow(
-                column(12, div(class = "info-box", strong("Import Notes:"), br(), textOutput("col_import_notes")))
+                column(6, div(class = "info-box", strong("SQL Import Risk:"), br(), textOutput("col_import_risk"))),
+                column(6, div(class = "info-box", strong("Import Status Notes:"), br(), uiOutput("col_import_status_notes")))
               ),
               fluidRow(
                 column(12, div(class = "info-box", strong("Fields That May Cause Import Errors:"), br(), textOutput("col_import_errors")))
@@ -830,7 +881,7 @@ ui <- fluidPage(
                     placeholder = "🔍 Search relationships (table names, columns, join types)...", width = "100%")
       ),
       
-      div(class = "import-note", paste("Date of Data Import:", IMPORT_DATE)),
+      div(class = "import-note", textOutput("extract_date_rel")),
       
       div(class = "relationship-summary",
           fluidRow(
@@ -1486,6 +1537,7 @@ server <- function(input, output, session) {
         mutate(
           `Table Name` = Table,
           `Field Name` = Column,
+          `Sample Values Raw` = sample_values,
           `Total Rows (n)` = rows_total,
           `Filled (n)` = filled_n,
           `Missing (n)` = missing_n,
@@ -1508,6 +1560,7 @@ server <- function(input, output, session) {
           `Table Name`,
           `Field Name`,
           `Field Type`,
+          `Sample Values Raw`,
           `Total Rows (n)`,
           `Filled (n)`,
           `Missing (n)`,
@@ -1546,6 +1599,7 @@ server <- function(input, output, session) {
           `Table Name`,
           `Field Name`,
           `Field Type`,
+          `Sample Values Raw`,
           `Total Rows (n)`,
           `Filled (n)`,
           `Missing (n)`,
@@ -1637,6 +1691,18 @@ server <- function(input, output, session) {
       filter(if_any(everything(), ~ str_detect(str_to_lower(as.character(.x)), str_to_lower(q))))
   })
   
+  # --- Extract Date (All Tables) ---
+  output$extract_date_all <- renderText({
+    req(processed_data())
+    dates <- processed_data()$test_app_display$`Extract Date`
+    dates <- dates[!is.na(dates) & dates != ""]
+    if (length(dates) == 0) return("Extract Date: —")
+    # Use the most frequent extract date across dataset
+    date_tbl <- sort(table(dates), decreasing = TRUE)
+    top_date <- names(date_tbl)[1]
+    paste0("Extract Date: ", top_date)
+  })
+  
   # --- All Tables render
   output$results <- renderDT({
     req(processed_data())
@@ -1651,6 +1717,20 @@ server <- function(input, output, session) {
     }
     
     data_display <- data_display %>%
+      mutate(
+        `SQL Import Risk` = {
+          rv <- as.character(`SQL Import Risk`)
+          lvl <- dplyr::case_when(
+            is.na(rv) | rv == "" ~ "none",
+            tolower(rv) == "none" ~ "none",
+            stringr::str_detect(tolower(rv), "high") ~ "high",
+            stringr::str_detect(tolower(rv), "medium") ~ "medium",
+            stringr::str_detect(tolower(rv), "low") ~ "low",
+            TRUE ~ "unknown"
+          )
+          sprintf("<span class='risk-badge risk-%s'>%s</span>", lvl, rv)
+        }
+      ) %>%
       mutate(
         `Table Name` = sprintf(
           "<a href='#' onclick=\"Shiny.setInputValue('selected_table','%s',{priority:'event'})\">%s</a>",
@@ -1715,18 +1795,135 @@ server <- function(input, output, session) {
       shinyjs::hide("submit_column")
       
       output$col_name <- renderText({ format_text_value(selected$`Field Name`) })
+      output$extract_date_column <- renderText({ paste0("Extract Date: ", format_text_value(selected$`Extract Date`)) })
       output$col_type <- renderText({ format_text_value(selected$`Field Type`) })
       output$col_total_rows <- renderText({ format_count_value(selected$`Total Rows (n)`) })
       output$col_filled <- renderText({ format_count_value(selected$`Filled (n)`) })
       output$col_missing_n <- renderText({ format_count_value(selected$`Missing (n)`) })
       output$col_missing_pct <- renderText({ format_percent_value(selected$`Missing (%)`) })
+      output$col_fill_rate <- renderText({
+        miss <- suppressWarnings(as.numeric(selected$`Missing (%)`))
+        if (is.na(miss)) return("—")
+        paste0(round(100 - miss, 1), "%")
+      })
       output$col_unique <- renderText({ format_count_value(selected$`Unique (n)`) })
       output$col_unique_pct <- renderText({ format_percent_value(selected$`Unique (%)`) })
       output$col_import_risk <- renderText({ format_text_value(selected$`SQL Import Risk`) })
       output$col_default <- renderText({ derive_default() })
-      output$col_values <- renderText({ format_text_value(selected$`Example Values Full`) })
-      output$col_import_notes <- renderText({ format_text_value(selected$`Import Notes`) })
+      output$col_values_compact <- renderText({ format_text_value(selected$`Example Values`) })
+      output$col_values_full <- renderText({ format_text_value(selected$`Example Values Full`) })
+      output$col_import_status_notes <- renderUI({
+        risk <- format_text_value(selected$`SQL Import Risk`)
+        notes <- format_text_value(selected$`Import Notes`)
+        txt <- paste(c(if (risk != "—") paste0("Status: ", risk) else NULL,
+                       if (notes != "—") paste0("Notes: ", notes) else NULL),
+                     collapse = " | ")
+        if (txt == "") txt <- "—"
+        HTML(txt)
+      })
       output$col_import_errors <- renderText({ format_text_value(selected$`Fields That May Cause Import Errors`) })
+      output$col_value_range_section <- renderUI({
+        if (identical(data_source(), "internal")) {
+          fluidRow(
+            column(3, div(class = "info-box", strong("Min Value:"), br(), format_text_value(selected$`Min Value`))),
+            column(3, div(class = "info-box", strong("Max Value:"), br(), format_text_value(selected$`Max Value`))),
+            column(3, div(class = "info-box", strong("Min Field Length:"), br(), format_text_value(selected$`Min Field Length`))),
+            column(3, div(class = "info-box", strong("Max Field Length:"), br(), format_text_value(selected$`Max Field Length`)))
+          )
+        } else {
+          fluidRow(
+            column(12, div(class = "info-box",
+              strong("Value Ranges & Lengths:"), br(),
+              HTML("Hidden in suppressed view. Available in internal app.")))
+          )
+        }
+      })
+
+      # Modal to show context-aware Example Values table
+      observeEvent(input$open_examples, {
+        # Build parsed examples
+        raw_str <- selected$`Sample Values Raw` %||% ""
+        parsed_df <- parse_sample_values_df(raw_str)
+
+        # If GlobalCode, try to attach CodeName
+        is_gc <- grepl("GlobalCode", selected$`Field Type` %||% "", ignore.case = TRUE)
+        if (is_gc && nrow(parsed_df) > 0 && !is.null(sc_global_codes) && nrow(sc_global_codes) > 0) {
+          # Attempt mapping on multiple keys
+          vals <- parsed_df$value
+          global_code_id_col <- if ("GlobalCodeId" %in% names(sc_global_codes)) "GlobalCodeId" else names(sc_global_codes)[1]
+          code_name_col <- if ("CodeName" %in% names(sc_global_codes)) "CodeName" else NULL
+          code_col <- if ("Code" %in% names(sc_global_codes)) "Code" else NULL
+
+          # Create map by id and code as characters
+          gc_map <- list()
+          if (!is.null(code_name_col)) {
+            # Map by GlobalCodeId
+            if (!is.null(global_code_id_col)) {
+              tmp <- sc_global_codes
+              tmp$id_char <- as.character(tmp[[global_code_id_col]])
+              gc_map[["id"]] <- tmp[, c("id_char", code_name_col)]
+            }
+            # Map by Code
+            if (!is.null(code_col)) {
+              tmp <- sc_global_codes
+              tmp$code_char <- as.character(tmp[[code_col]])
+              gc_map[["code"]] <- tmp[, c("code_char", code_name_col)]
+            }
+          }
+
+          # Resolve names
+          code_name <- rep(NA_character_, nrow(parsed_df))
+          # Try id
+          if (!is.null(gc_map[["id"]])) {
+            m <- match(as.character(suppressWarnings(as.numeric(vals))), gc_map[["id"]][["id_char"]])
+            hit <- !is.na(m)
+            code_name[hit] <- gc_map[["id"]][[code_name_col]][m[hit]]
+          }
+          # Try code
+          if (!is.null(gc_map[["code"]])) {
+            remaining <- is.na(code_name)
+            if (any(remaining)) {
+              m2 <- match(as.character(vals[remaining]), gc_map[["code"]][["code_char"]])
+              hit2 <- !is.na(m2)
+              idx <- which(remaining)
+              code_name[idx[hit2]] <- gc_map[["code"]][[code_name_col]][m2[hit2]]
+            }
+          }
+          parsed_df$code_name <- code_name
+        }
+
+        # Context-aware view for suppressed route
+        if (identical(data_source(), "suppressed")) {
+          allow <- is_gc || grepl("(bool|bit|logical|yes|no|true|false)", selected$`Field Type` %||% "", ignore.case = TRUE)
+          if (!allow) {
+            showModal(modalDialog(
+              title = paste0("Example Values — ", selected$`Field Name`),
+              tags$p("Example values are hidden in the suppressed view for this field."),
+              easyClose = TRUE, footer = modalButton("Close"))
+            )
+            return()
+          }
+        }
+
+        # Compose display table
+        display_df <- parsed_df
+        # Reorder and format
+        if ("code_name" %in% names(display_df)) {
+          display_df <- display_df %>% select(value, code_name, n, pct)
+          names(display_df) <- c("Value", "Code Name", "n", "%")
+        } else {
+          display_df <- display_df %>% select(value, n, pct)
+          names(display_df) <- c("Value", "n", "%")
+        }
+
+        # Show modal with DT
+        showModal(modalDialog(
+          title = paste0("Example Values — ", selected$`Field Name`),
+          DT::renderDT(DT::datatable(display_df, rownames = FALSE, options = list(dom = 't', pageLength = 20))),
+          easyClose = TRUE,
+          footer = tagList(modalButton("Close"))
+        ))
+      })
     
     output$col_context_text <- renderUI({
       this_tbl <- selected$Table
@@ -1821,6 +2018,13 @@ server <- function(input, output, session) {
     updateTabsetPanel(session, "mainNav", selected = "Table Details")
     
     output$tbl_header <- renderText({ paste0("Table: ", meta$Table) })
+    # Show the most common extract date for this table's fields
+    table_dates <- processed_data()$test_app %>%
+      dplyr::filter(Table == tbl) %>%
+      dplyr::pull(`Extract Date`)
+    table_dates <- table_dates[!is.na(table_dates) & table_dates != ""]
+    extract_date_value <- if (length(table_dates) > 0) names(sort(table(table_dates), decreasing = TRUE))[1] else "—"
+    output$extract_date_table <- renderText({ paste0("Extract Date: ", extract_date_value) })
     
     # Load saved annotations or use original description
     saved_desc <- get_annotation("table", tbl, field_name = "description")
@@ -1838,6 +2042,21 @@ server <- function(input, output, session) {
     output$tbl_cols <- renderText({ meta$`# of Table Cols` })
     output$tbl_rows <- renderText({ format(meta$`# of Table Rows`, big.mark = ",") })
     output$tbl_updated <- renderText({ meta$`Last Updated` %||% "" })
+    # Compute table-level SQL Import Risk summary badge
+    tbl_risks <- processed_data()$test_app %>%
+      dplyr::filter(Table == tbl) %>%
+      dplyr::pull(`SQL Import Risk`)
+    tbl_risks <- tbl_risks[!is.na(tbl_risks) & tbl_risks != ""]
+    non_none <- tbl_risks[tolower(tbl_risks) != "none"]
+    top_flag <- if (length(non_none) > 0) names(sort(table(non_none), decreasing = TRUE))[1] else "None"
+    lvl <- dplyr::case_when(
+      tolower(top_flag) == "none" ~ "none",
+      stringr::str_detect(tolower(top_flag), "high") ~ "high",
+      stringr::str_detect(tolower(top_flag), "medium") ~ "medium",
+      stringr::str_detect(tolower(top_flag), "low") ~ "low",
+      TRUE ~ "unknown"
+    )
+    output$tbl_import_risk <- renderUI({ HTML(sprintf("<span class='risk-badge risk-%s'>%s</span>", lvl, top_flag)) })
     
     cols_expanded <- data$test_app %>%
       filter(Table == tbl) %>%
@@ -1968,6 +2187,17 @@ server <- function(input, output, session) {
                 )
               ))
   }, server = TRUE)
+  
+  # Extract Date for Relationships tab (fallback to overall dataset's most common)
+  output$extract_date_rel <- renderText({
+    req(processed_data())
+    dates <- processed_data()$test_app_display$`Extract Date`
+    dates <- dates[!is.na(dates) & dates != ""]
+    if (length(dates) == 0) return("Extract Date: —")
+    date_tbl <- sort(table(dates), decreasing = TRUE)
+    top_date <- names(date_tbl)[1]
+    paste0("Extract Date: ", top_date)
+  })
 }
 
 # =====================================================
